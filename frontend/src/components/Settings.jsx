@@ -198,28 +198,6 @@ const Settings = ({ isOpen, onClose, userId }) => {
                 <Info className="mr-2 h-4 w-4" />
                 Thông tin PTIT
               </TabsTrigger>
-              <TabsTrigger
-                value="account"
-                className={`justify-start w-full ${
-                  isLight
-                    ? "text-gray-800 data-[state=active]:border-l-[3px] data-[state=active]:border-blue-600 data-[state=active]:bg-white data-[state=active]:text-blue-700 data-[state=active]:font-medium"
-                    : "data-[state=active]:border-l-[3px] data-[state=active]:border-[#d1cfc0]"
-                }`}
-              >
-                <User className="mr-2 h-4 w-4" />
-                Tài khoản
-              </TabsTrigger>
-              <TabsTrigger
-                value="security"
-                className={`justify-start w-full ${
-                  isLight
-                    ? "text-gray-800 data-[state=active]:border-l-[3px] data-[state=active]:border-blue-600 data-[state=active]:bg-white data-[state=active]:text-blue-700 data-[state=active]:font-medium"
-                    : "data-[state=active]:border-l-[3px] data-[state=active]:border-[#d1cfc0]"
-                }`}
-              >
-                <Key className="mr-2 h-4 w-4" />
-                Bảo mật
-              </TabsTrigger>
             </TabsList>
 
             {/* Content */}

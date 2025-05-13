@@ -15,7 +15,7 @@ logger = Logger()
 class AiService:
     def __init__(self):
         # OpenRouter API Configuration
-        self.OPENROUTER_API_KEY = "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"
+        self.OPENROUTER_API_KEY = "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"
         self.DEFAULT_MODEL = "qwen/qwen3-235b-a22b:free" 
         
         # Initialize OpenAI client with OpenRouter configuration

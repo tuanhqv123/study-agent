@@ -45,7 +45,17 @@ class QueryClassifier:
                 'method': 'keyword'
             }
         
-        # Check if it's a date query first
+        # First check for exam schedule-related queries (highest priority)
+        is_schedule, keyword, category = self.is_schedule_related(text)
+        if is_schedule and category == 'examschedule':
+            return {
+                'category': category,
+                'confidence': 0.9,
+                'method': 'keyword',
+                'keyword': keyword
+            }
+            
+        # Then check if it's a date query
         is_date, date_info = self.is_date_query(text)
         if is_date:
             return {
@@ -56,8 +66,7 @@ class QueryClassifier:
                 'date_info': date_info
             }
             
-        # Then try schedule-related classification (faster)
-        is_schedule, keyword, category = self.is_schedule_related(text)
+        # Then check for regular class schedule-related classification
         if is_schedule:
             return {
                 'category': category,
@@ -80,15 +89,7 @@ class QueryClassifier:
 
         # Define exam schedule related patterns in Vietnamese and English
         exam_schedule_keywords = {
-            'vn': [
-                'lịch thi', 'kì thi', 'kỳ thi', 'ngày thi', 'ca thi', 'phòng thi',
-                'lịch kiểm tra', 'lịch kỳ thi', 'khi nào thi', 'thời gian thi',
-                'lịch cuối kỳ', 'thi cuối kỳ', 'thi giữa kỳ', 'thi học kỳ',
-                'địa điểm thi', 'hình thức thi', 'lịch final', 'tuần thi',
-                'lịch thi tuần này', 'lịch thi tuần sau', 'thi trong tuần',
-                'tuần này thi', 'tuần sau thi', 'thi trong tuần này', 'thi trong tuần sau',
-                'lịch thi của tuần', 'kỳ thi tuần', 'kỳ thi trong tuần'
-            ],
+            
             'vn_no_accent': [
                 'lich thi', 'ki thi', 'ky thi', 'ngay thi', 'ca thi', 'phong thi',
                 'lich kiem tra', 'lich ky thi', 'khi nao thi', 'thoi gian thi',
@@ -96,7 +97,7 @@ class QueryClassifier:
                 'dia diem thi', 'hinh thuc thi', 'lich final', 'tuan thi',
                 'lich thi tuan nay', 'lich thi tuan sau', 'thi trong tuan',
                 'tuan nay thi', 'tuan sau thi', 'thi trong tuan nay', 'thi trong tuan sau',
-                'lich thi cua tuan', 'ky thi tuan', 'ky thi trong tuan'
+                'lich thi cua tuan', 'ky thi tuan', 'ky thi trong tuan', 'thi mon', 'mon thi'
             ],
             'en': [
                 'exam schedule', 'test schedule', 'exam date', 'exam time', 'exam room',
@@ -123,6 +124,15 @@ class QueryClassifier:
                 'lecture time', 'class hours'
             ]
         }
+
+        # Check if the query contains date and exam references (special case)
+        has_date_reference = 'tháng' in text_lower or 'thang' in text_normalized or 'ngày' in text_lower or 'ngay' in text_normalized
+        has_exam_reference = 'thi' in text_lower or 'thi' in text_normalized
+        has_subject_reference = 'môn' in text_lower or 'mon' in text_normalized
+        
+        # If query has both date reference and exam/subject reference, prioritize exam schedule
+        if has_date_reference and (has_exam_reference or has_subject_reference):
+            return True, "thi + date", 'examschedule'
 
         # Check for exam schedule keywords
         for category in exam_schedule_keywords.values():

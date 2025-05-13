@@ -211,7 +211,9 @@ class ScheduleService:
         
         for ref_type, phrases in date_references.items():
             for phrase in phrases:
-                if phrase in question_normalized or phrase in question_lower:
+                # Use word boundary regex to ensure we're matching whole words, not parts of words
+                pattern = r'\b' + re.escape(phrase) + r'\b'
+                if re.search(pattern, question_normalized) or re.search(pattern, question_lower):
                     logger.log_with_timestamp("DATE EXTRACTION", f"✓ Found date reference: {phrase} ({ref_type})")
                     
                     if ref_type == 'today':
@@ -260,7 +262,9 @@ class ScheduleService:
         
         for day_name, phrases in weekday_references.items():
             for phrase in phrases:
-                if phrase in question_normalized or phrase in question_lower:
+                # Use word boundary regex to ensure we're matching whole words
+                pattern = r'\b' + re.escape(phrase) + r'\b'
+                if re.search(pattern, question_normalized) or re.search(pattern, question_lower):
                     logger.log_with_timestamp("DATE EXTRACTION", f"✓ Found weekday reference: {phrase} ({day_name})")
                     
                     target_weekday = weekday_map[day_name]
@@ -639,30 +643,53 @@ class ScheduleService:
             days_in_range = (end_date - start_date).days + 1
             
             # Limit to 7 days for week queries to avoid excessive API calls
-            if date_type in ['this_week', 'next_week']:
+            if date_type in ['this_week', 'next_week', 'specific_week']:
                 days_to_fetch = min(days_in_range, 7)
             else:
                 # For month queries, limit to 14 days to avoid excessive API calls
                 days_to_fetch = min(days_in_range, 14)
             
-            # Get schedule for each day in the range
-            has_classes = False
+            # Store all schedule data for each day in the range
+            all_daily_schedules = []
+            has_any_classes = False
+            
+            # Fetch schedules for all days in the range
             for i in range(days_to_fetch):
                 current_date = start_date + timedelta(days=i)
                 daily_schedule = await self.get_schedule(current_date, hoc_ky)
                 
-                if daily_schedule and daily_schedule["classes"]:
-                    has_classes = True
-                    formatted_message += f"--- {current_date.strftime('%d/%m/%Y')} ---\n"
-                    formatted_message += self.format_schedule_for_display(daily_schedule)
-                    formatted_message += "\n"
+                if daily_schedule:
+                    all_daily_schedules.append(daily_schedule)
+                    if daily_schedule["classes"]:
+                        has_any_classes = True
             
-            if not has_classes:
-                formatted_message += f"Không có lớp học nào trong khoảng thời gian từ {start_date.strftime('%d/%m/%Y')} đến {start_date + timedelta(days=days_to_fetch-1)}.\n"
+            # Format the combined schedule data
+            for daily_schedule in all_daily_schedules:
+                current_date = datetime.strptime(daily_schedule['date'], '%Y-%m-%d').date()
+                formatted_date = current_date.strftime('%d/%m/%Y')
+                day_name = self.get_vietnamese_weekday(current_date.weekday())
+                
+                formatted_message += f"--- {day_name}, {formatted_date} ---\n"
+                
+                if daily_schedule["classes"]:
+                    formatted_message += self.format_schedule_for_display(daily_schedule, include_header=False)
+                else:
+                    formatted_message += "Không có lớp học vào ngày này.\n"
+                
+                formatted_message += "\n"
+            
+            if not has_any_classes:
+                formatted_message += f"Không có lớp học nào trong khoảng thời gian này.\n"
                 formatted_message += "Vui lòng kiểm tra lại lịch học trên hệ thống quản lý học tập của trường."
             
             # Format the date range information for the response
             date_range_info = f"{start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}"
+            
+            # Add all schedule data to the response
+            all_schedules = {
+                'date_range': date_range_info,
+                'daily_schedules': all_daily_schedules
+            }
             
         else:  # Single date
             # Get schedule data from PTIT API
@@ -674,10 +701,17 @@ class ScheduleService:
             
             # Format the single date information for the response
             date_range_info = date_info.strftime('%d/%m/%Y')
+            
+            # Add the schedule data to the response
+            all_schedules = {
+                'single_date': date_range_info,
+                'schedule': schedule_data
+            }
         
         return {
             'schedule_text': formatted_message,
             'date_info': date_range_info,
             'date_type': date_type,
-            'original_text': original_text
+            'original_text': original_text,
+            'all_schedules': all_schedules
         }

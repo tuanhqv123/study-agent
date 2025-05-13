@@ -246,6 +246,7 @@ async def chat():
                     # (exam schedules are usually more relevant for specific dates)
                     if date_info_tuple[1] in ['this_week', 'next_week', 'last_week', 'specific_week']:
                         all_classes = []
+                        formatted_days = []
                         days_in_range = (end_date - start_date).days + 1
                         days_to_fetch = min(days_in_range, 7)  # Limit to 7 days for week queries
                         
@@ -253,14 +254,35 @@ async def chat():
                         for i in range(days_to_fetch):
                             current_date = start_date + timedelta(days=i)
                             daily_classes = schedule_service.get_class_schedule(schedule_result, current_date)
+                            
+                            # Format each day with its classes
+                            weekday_vn = schedule_service.get_vietnamese_weekday(current_date.weekday())
+                            day_formatted = f"--- {weekday_vn}, ngày {current_date.strftime('%d/%m/%Y')} ---\n"
+                            
                             if daily_classes:
                                 for class_info in daily_classes:
                                     # Add date information to each class
                                     class_info['date'] = current_date.strftime('%d/%m/%Y')
                                     class_info['day_of_week'] = current_date.strftime('%A')
                                     all_classes.append(class_info)
+                                    
+                                    # Add class details to the formatted day
+                                    day_formatted += f"- {class_info.get('ten_mon', '')} ({class_info.get('ma_mon', '')})\n"
+                                    
+                                    if class_info.get('ten_mon_eg'):
+                                        day_formatted += f"  {class_info.get('ten_mon_eg')}\n"
+                                        
+                                    day_formatted += f"  {class_info.get('time', '')}\n"
+                                    day_formatted += f"  Phòng {class_info.get('room', '')}\n"
+                                    day_formatted += f"  {class_info.get('lecturer', '')}\n\n"
+                            else:
+                                day_formatted += "Không có lớp học vào ngày này.\n\n"
+                            
+                            formatted_days.append(day_formatted)
                         
+                        # Store both the raw class data and the formatted weekly view
                         schedule_text = all_classes
+                        formatted_weekly_schedule = "\n".join(formatted_days)
                         
                         # Also get exam schedules for the date range
                         logger.log_with_timestamp(
@@ -281,6 +303,7 @@ async def chat():
                     else:
                         # For other date ranges, just get the first day
                         schedule_text = schedule_service.get_class_schedule(schedule_result, start_date)
+                        formatted_weekly_schedule = None
                         
                         # Also get exam schedule for the start date
                         date_str = start_date.strftime('%d/%m/%Y')
@@ -311,6 +334,7 @@ async def chat():
                     'date_type': date_info_tuple[1],
                     'original_text': date_info_tuple[2],
                     'schedule_text': schedule_text,
+                    'formatted_weekly_schedule': formatted_weekly_schedule if isinstance(date_info_value, tuple) else None,
                     'exam_text': exam_text,
                     'exam_count': exam_count
                 }
@@ -318,7 +342,7 @@ async def chat():
                 # Log the processing result (reduced verbosity)
                 logger.log_with_timestamp(
                     "SCHEDULE RESULT", 
-                    f"Date: {schedule_result['date_info']} | Additional info: Type: {schedule_result['date_type']} | Original text: {schedule_result['original_text']}"
+                    f"Date: {schedule_result['date_info']} | Additional info: Type: {schedule_result['date_type']} | Original text: {schedule_result['original_text'][:10]}..."
                 )
                 
                 # Format the schedule data for display
@@ -403,7 +427,12 @@ async def chat():
                     combined_data = ""
                     
                     if has_classes:
-                        combined_data += "LỊCH HỌC:\n" + formatted_schedule + "\n"
+                        if schedule_result.get('formatted_weekly_schedule'):
+                            # For week-based queries, use the formatted weekly view
+                            combined_data += "LỊCH HỌC TRONG TUẦN:\n" + schedule_result['formatted_weekly_schedule'] + "\n"
+                        else:
+                            # For single-day queries, use the standard format
+                            combined_data += "LỊCH HỌC:\n" + formatted_schedule + "\n"
                     
                     if has_exams:
                         combined_data += "LỊCH THI:\n" + schedule_result['exam_text']
@@ -420,8 +449,10 @@ async def chat():
                         {combined_data}
 
                         Please respond in Vietnamese, summarizing this information in a natural, 
-                        conversational way. Mention the date and add any relevant reminders 
-                        about being on time for classes or exams. 
+                        conversational way. If this is a week-based schedule, make sure to mention 
+                        that this is the schedule for the entire week from {schedule_result['date_info']}.
+                        
+                        Add any relevant reminders about being on time for classes or exams. 
                         
                         If there are both classes and exams, make sure to clearly distinguish between them.
                         If there are exams, emphasize their importance and suggest preparing well in advance.

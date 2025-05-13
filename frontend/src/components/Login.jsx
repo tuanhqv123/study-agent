@@ -86,26 +86,6 @@ const Login = () => {
 
         {error && <div className="text-red-500 text-sm mb-4">{error}</div>}
 
-        <button
-          onClick={handleLoginWithGoogle}
-          disabled={isLoading}
-          className={`w-full px-4 py-2 ${
-            isLight
-              ? "bg-gray-100 text-gray-800 hover:bg-gray-200 focus:ring-gray-300"
-              : "bg-white/10 text-white hover:bg-white/20 focus:ring-white/20"
-          } rounded-md focus:outline-none focus:ring-2 mb-4`}
-        >
-          {isLoading ? "Đang xử lý..." : "Đăng nhập với Google"}
-        </button>
-
-        <div
-          className={`text-center ${
-            isLight ? "text-gray-600" : "text-white/80"
-          } mb-4`}
-        >
-          hoặc
-        </div>
-
         {step === 1 ? (
           <form onSubmit={handleLogin} className="space-y-4">
             <div>

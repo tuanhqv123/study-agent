@@ -253,8 +253,31 @@ class ExamScheduleService:
         filter_type = "all"
         filter_value = ""
         
-        # Use the ScheduleService's date extraction if available
-        if self.schedule_service:
+        # First check for subject references in the query (highest priority)
+        question_lower = question.lower()
+        
+        # Check for subject queries - common subject-related terms in Vietnamese
+        subject_terms = ["môn", "học phần", "mã môn", "mã học phần", "môn học"]
+        subject_found = False
+        
+        for term in subject_terms:
+            if term in question_lower:
+                # Extract words after the term (simple approach)
+                parts = question_lower.split(term)
+                if len(parts) > 1:
+                    subject_keyword = parts[1].strip().split()[0].strip()
+                    if len(subject_keyword) > 2:  # Avoid too short keywords
+                        subject_exams = self.get_exams_by_subject(exam_data, subject_keyword)
+                        if subject_exams:
+                            logger.log_with_timestamp("EXAM SCHEDULE", f"Found subject keyword: {subject_keyword}, matches: {len(subject_exams)}")
+                            exams_to_display = subject_exams
+                            filter_type = "subject"
+                            filter_value = subject_keyword
+                            subject_found = True
+                            break
+                    
+        # Only try date extraction if no subject was found or if we specifically want to filter by date
+        if not subject_found and self.schedule_service:
             logger.log_with_timestamp("EXAM SCHEDULE", "Using ScheduleService for date extraction")
             
             # Extract date from query
@@ -262,25 +285,27 @@ class ExamScheduleService:
             
             logger.log_with_timestamp("EXAM SCHEDULE", f"Date extraction result: {date_type}, {original_text}")
             
-            # Handle date ranges (weeks, months)
-            if isinstance(date_info, tuple):
-                start_date, end_date = date_info
-                logger.log_with_timestamp("EXAM SCHEDULE", 
-                                         f"Date range detected: {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}")
-                
-                # Get exams within the date range
-                exams_to_display = self.get_exams_by_date_range(exam_data, start_date, end_date)
-                filter_type = "date_range"
-                filter_value = f"{start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}"
-            else:
-                # Single date
-                logger.log_with_timestamp("EXAM SCHEDULE", f"Single date: {date_info.strftime('%d/%m/%Y')}")
-                date_str = date_info.strftime('%d/%m/%Y')
-                exams_to_display = self.get_exams_by_date(exam_data, date_str)
-                filter_type = "date"
-                filter_value = date_str
-        else:
-            # Fallback to basic pattern matching
+            # Only filter if a specific date was actually found in the query (not defaulted to today)
+            if original_text != 'default':
+                # Handle date ranges (weeks, months)
+                if isinstance(date_info, tuple):
+                    start_date, end_date = date_info
+                    logger.log_with_timestamp("EXAM SCHEDULE", 
+                                             f"Date range detected: {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}")
+                    
+                    # Get exams within the date range
+                    exams_to_display = self.get_exams_by_date_range(exam_data, start_date, end_date)
+                    filter_type = "date_range"
+                    filter_value = f"{start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}"
+                else:
+                    # Single date
+                    logger.log_with_timestamp("EXAM SCHEDULE", f"Single date: {date_info.strftime('%d/%m/%Y')}")
+                    date_str = date_info.strftime('%d/%m/%Y')
+                    exams_to_display = self.get_exams_by_date(exam_data, date_str)
+                    filter_type = "date"
+                    filter_value = date_str
+        elif not subject_found:
+            # Fallback to basic pattern matching for dates
             logger.log_with_timestamp("EXAM SCHEDULE", "Using basic pattern matching for date extraction")
             
             # Check for date queries - look for DD/MM or DD/MM/YYYY patterns
@@ -290,12 +315,11 @@ class ExamScheduleService:
                 r'ngay (\d{1,2})[/-](\d{1,2})'               # ngay DD/MM
             ]
             
-            question_lower = question.lower()
-            
             # Check for date references
             import re
+            date_found = False
             for pattern in date_patterns:
-                matches = re.search(pattern, question)
+                matches = re.search(pattern, question_lower)
                 if matches:
                     day = int(matches.group(1))
                     month = int(matches.group(2))
@@ -309,34 +333,25 @@ class ExamScheduleService:
                         exams_to_display = self.get_exams_by_date(exam_data, date_str)
                         filter_type = "date"
                         filter_value = date_str
+                        date_found = True
                         break
                     except:
                         continue
-            
-            # Check for subject queries if no date filter applied
-            if filter_type == "all":
-                # Common subject-related terms in Vietnamese
-                subject_terms = ["môn", "học phần", "mã môn", "mã học phần", "môn học"]
-                
-                for term in subject_terms:
-                    if term in question_lower:
-                        # Extract words after the term (simple approach)
-                        parts = question_lower.split(term)
-                        if len(parts) > 1:
-                            subject_keyword = parts[1].strip().split()[0].strip()
-                            if len(subject_keyword) > 2:  # Avoid too short keywords
-                                exams_to_display = self.get_exams_by_subject(exam_data, subject_keyword)
-                                filter_type = "subject"
-                                filter_value = subject_keyword
-                                break
         
         # Format the filtered exams
         formatted_exams = self.format_exam_schedule(exams_to_display)
+        
+        # For subject queries, if we found a match, ensure we mention the subject in the response
+        if filter_type == "subject":
+            logger.log_with_timestamp("EXAM SCHEDULE", f"Final result: Subject filter = {filter_value}, found {len(exams_to_display)} exams")
+        else:
+            logger.log_with_timestamp("EXAM SCHEDULE", f"Final result: Filter type = {filter_type}, found {len(exams_to_display)} exams")
         
         return {
             'exam_text': formatted_exams,
             'filter_type': filter_type,
             'filter_value': filter_value,
             'exam_count': len(exams_to_display),
-            'is_midterm': is_giua_ky
+            'is_midterm': is_giua_ky,
+            'query': question
         } 
