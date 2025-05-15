@@ -15,18 +15,16 @@ logger = Logger()
 class AiService:
     def __init__(self):
         # OpenRouter API Configuration
-        self.OPENROUTER_API_KEY = "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"
+        self.OPENROUTER_API_KEY = "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"
         self.DEFAULT_MODEL = "qwen/qwen3-235b-a22b:free" 
         
         # Initialize OpenAI client with OpenRouter configuration
         try:
-            # Cách 1: Không dùng tham số proxies
             self.client = OpenAI(
                 base_url="https://openrouter.ai/api/v1",
                 api_key=self.OPENROUTER_API_KEY
             )
         except TypeError:
-            # Cách 2: Nếu có lỗi, thử tạo httpx client trước
             http_client = httpx.Client()
             self.client = OpenAI(
                 base_url="https://openrouter.ai/api/v1",

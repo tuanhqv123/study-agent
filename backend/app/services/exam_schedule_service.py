@@ -262,20 +262,50 @@ class ExamScheduleService:
         
         for term in subject_terms:
             if term in question_lower:
-                # Extract words after the term (simple approach)
+                # Extract all words after the term, not just the first one
                 parts = question_lower.split(term)
                 if len(parts) > 1:
-                    subject_keyword = parts[1].strip().split()[0].strip()
-                    if len(subject_keyword) > 2:  # Avoid too short keywords
-                        subject_exams = self.get_exams_by_subject(exam_data, subject_keyword)
-                        if subject_exams:
-                            logger.log_with_timestamp("EXAM SCHEDULE", f"Found subject keyword: {subject_keyword}, matches: {len(subject_exams)}")
-                            exams_to_display = subject_exams
-                            filter_type = "subject"
-                            filter_value = subject_keyword
-                            subject_found = True
-                            break
+                    # Lấy cả cụm từ sau từ khóa, loại bỏ các từ khóa thời gian và thi
+                    remainder = parts[1].strip()
                     
+                    # Loại bỏ các từ khóa thời gian và thi ở cuối câu
+                    time_keywords = ["khi nào", "bao giờ", "ngày mấy", "lúc nào", "thi", "kiểm tra", "cuối kỳ", "giữa kỳ"]
+                    for kw in time_keywords:
+                        if kw in remainder:
+                            remainder = remainder.split(kw)[0].strip()
+                    
+                    # Tách thành các từ, lấy tối đa 3 từ đầu tiên để có cụm từ môn học hợp lý
+                    words = remainder.split()
+                    if len(words) >= 1:
+                        # Lấy 1-3 từ đầu tiên, tùy theo độ dài của remainder
+                        subject_words = words[:min(3, len(words))]
+                        subject_keyword = " ".join(subject_words)
+                        
+                        logger.log_with_timestamp("EXAM SCHEDULE", f"Extracted subject keyword: '{subject_keyword}'")
+                        
+                        if len(subject_keyword) > 2:  # Vẫn giữ điều kiện từ khóa phải dài hơn 2 ký tự
+                            subject_exams = self.get_exams_by_subject(exam_data, subject_keyword)
+                            
+                            # Thử thêm với từng từ riêng nếu không tìm thấy kết quả với cả cụm
+                            if not subject_exams and len(subject_words) > 1:
+                                logger.log_with_timestamp("EXAM SCHEDULE", f"No results for '{subject_keyword}', trying individual words")
+                                for word in subject_words:
+                                    if len(word) > 2:  # Từ phải dài hơn 2 ký tự
+                                        word_exams = self.get_exams_by_subject(exam_data, word)
+                                        if word_exams:
+                                            logger.log_with_timestamp("EXAM SCHEDULE", f"Found keyword match using single word: '{word}', matches: {len(word_exams)}")
+                                            subject_exams = word_exams
+                                            subject_keyword = word
+                                            break
+                            
+                            if subject_exams:
+                                logger.log_with_timestamp("EXAM SCHEDULE", f"Found subject keyword: '{subject_keyword}', matches: {len(subject_exams)}")
+                                exams_to_display = subject_exams
+                                filter_type = "subject"
+                                filter_value = subject_keyword
+                                subject_found = True
+                                break
+        
         # Only try date extraction if no subject was found or if we specifically want to filter by date
         if not subject_found and self.schedule_service:
             logger.log_with_timestamp("EXAM SCHEDULE", "Using ScheduleService for date extraction")
@@ -304,6 +334,12 @@ class ExamScheduleService:
                     exams_to_display = self.get_exams_by_date(exam_data, date_str)
                     filter_type = "date"
                     filter_value = date_str
+            else:
+                # Nếu không xác định được ngày (mặc định 'today'), trả về tất cả dữ liệu từ API
+                logger.log_with_timestamp("EXAM SCHEDULE", "No specific date found, returning all exam data")
+                exams_to_display = exam_data['data']['ds_lich_thi'] if exam_data.get('data') and exam_data['data'].get('ds_lich_thi') else []
+                filter_type = "all"
+                filter_value = "all_exams"
         elif not subject_found:
             # Fallback to basic pattern matching for dates
             logger.log_with_timestamp("EXAM SCHEDULE", "Using basic pattern matching for date extraction")
@@ -347,11 +383,16 @@ class ExamScheduleService:
         else:
             logger.log_with_timestamp("EXAM SCHEDULE", f"Final result: Filter type = {filter_type}, found {len(exams_to_display)} exams")
         
+        # Thêm thông tin chi tiết bổ sung vào kết quả
+        is_full_data = (filter_type == "all" and filter_value == "all_exams")
+        
         return {
             'exam_text': formatted_exams,
             'filter_type': filter_type,
             'filter_value': filter_value,
             'exam_count': len(exams_to_display),
             'is_midterm': is_giua_ky,
-            'query': question
+            'query': question,
+            'is_full_data': is_full_data,  # Đánh dấu đây là toàn bộ dữ liệu lịch thi
+            'all_exams': exams_to_display if is_full_data else []  # Bao gồm toàn bộ dữ liệu gốc cho AI
         } 

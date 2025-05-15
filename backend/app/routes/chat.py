@@ -265,7 +265,7 @@ async def chat():
                                     class_info['date'] = current_date.strftime('%d/%m/%Y')
                                     class_info['day_of_week'] = current_date.strftime('%A')
                                     all_classes.append(class_info)
-                                    
+                        
                                     # Add class details to the formatted day
                                     day_formatted += f"- {class_info.get('ten_mon', '')} ({class_info.get('ma_mon', '')})\n"
                                     
@@ -570,7 +570,11 @@ async def chat():
                     # If it's a date range query, include that information
                     date_info = ""
                     week_context = ""
-                    if exam_result['filter_type'] == "date_range":
+                    
+                    if exam_result.get('is_full_data'):
+                        date_info = "cho toàn bộ học kỳ"
+                        week_context = "Đây là danh sách tất cả các kỳ thi trong học kỳ. Hãy tóm tắt thông tin và trả lời câu hỏi của người dùng một cách chi tiết. "
+                    elif exam_result['filter_type'] == "date_range":
                         date_info = f"cho khoảng thời gian {exam_result['filter_value']}"
                         
                         # Add additional context for week-based queries
@@ -582,7 +586,7 @@ async def chat():
                     exam_prompt = {
                         "role": "system",
                         "content": f"""
-                        You are a helpful study assistant. The student asked about their exam schedule.
+                        You are a helpful study assistant. The student asked about their exam schedule: "{message}"
                         Here is the exam information retrieved from the system {date_info}:
 
                         {exam_result['exam_text']}
@@ -590,6 +594,12 @@ async def chat():
                         {week_context}Please respond in Vietnamese, summarizing this information in a natural, 
                         conversational way. Mention the date or date range if provided, along with any upcoming exams,
                         their format, location and time.
+                        
+                        If this is the full semester's exam schedule, analyze the schedule to provide helpful insights like:
+                        - Which exams are coming up soonest
+                        - Any periods with multiple exams close together (exam clusters)
+                        - Overall distribution of exams throughout the semester
+                        
                         Add any relevant reminders about being prepared for exams.
                         Keep your response concise and friendly.
                         """

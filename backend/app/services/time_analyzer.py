@@ -79,20 +79,12 @@ class TimeAnalyzer:
                 target_date = None
                 try:
                     target_date = datetime(self.today.year, self.today.month, day).date()
-                    # If the day has passed in current month, check if user might be referring to next month
-                    if target_date < self.today and day < 15:  # Assuming if day is small, user might mean next month
-                        next_month = self.today.month + 1 if self.today.month < 12 else 1
-                        next_year = self.today.year if self.today.month < 12 else self.today.year + 1
-                        target_date = datetime(next_year, next_month, day).date()
                 except ValueError:
-                    # Invalid date, try next month if current month doesn't have this day
-                    try:
-                        next_month = self.today.month + 1 if self.today.month < 12 else 1
-                        next_year = self.today.year if self.today.month < 12 else self.today.year + 1
-                        target_date = datetime(next_year, next_month, day).date()
-                    except ValueError:
-                        # Still invalid, skip this pattern
-                        continue
+                    # Invalid date, use the last day of current month instead
+                    # Find the last day of the current month
+                    last_day = calendar.monthrange(self.today.year, self.today.month)[1]
+                    logger.log_with_timestamp("TIME ANALYSIS", f"Invalid date {day}/{self.today.month}. Using last day of month: {last_day}/{self.today.month}")
+                    target_date = datetime(self.today.year, self.today.month, last_day).date()
                 
                 if target_date:
                     logger.log_with_timestamp("TIME ANALYSIS", 
@@ -165,8 +157,8 @@ class TimeAnalyzer:
                         f"Current week calculation: Current Monday ({current_monday.strftime('%d/%m/%Y')}) + {weekday_index} days")
                 
                 logger.log_with_timestamp("TIME ANALYSIS", 
-                    f"Direct calculation: Today is {calendar.day_name[current_weekday]} (index {current_weekday}), " +
-                    f"Target day is {calendar.day_name[weekday_index]} (index {weekday_index}), " +
+                    f"Direct calculation: Today is {calendar.day_name[current_weekday]}, " +
+                    f"Target day is {calendar.day_name[weekday_index]}, " +
                     f"Final date: {target_date.strftime('%d/%m/%Y')}")
                 
                 return (target_date, weekday_name, f"thứ {day_ref}")
@@ -216,9 +208,13 @@ class TimeAnalyzer:
                     logger.log_with_timestamp("TIME ANALYSIS", f"Parsed specific date: {specific_date.strftime('%d/%m/%Y')}")
                     return (specific_date, 'specific_date', matches.group(0))
                 except ValueError:
-                    # Invalid date, like February 30
-                    logger.log_with_timestamp("TIME ANALYSIS", f"Invalid date: {day}/{month}/{year}")
-                    continue
+                    # Invalid date, use the last day of current month instead
+                    # Find the last day of the current month
+                    last_day = calendar.monthrange(self.today.year, self.today.month)[1]
+                    logger.log_with_timestamp("TIME ANALYSIS", f"Invalid date {day}/{self.today.month}. Using last day of month: {last_day}/{self.today.month}")
+                    target_date = datetime(self.today.year, self.today.month, last_day).date()
+                    logger.log_with_timestamp("TIME ANALYSIS", f"Parsed specific date: {target_date.strftime('%d/%m/%Y')}")
+                    return (target_date, 'specific_date', matches.group(0))
         
         # Check for specific week containing a date (e.g., "tuần có ngày 3")
         week_with_date_patterns = [
@@ -249,20 +245,12 @@ class TimeAnalyzer:
                 target_date = None
                 try:
                     target_date = datetime(self.today.year, self.today.month, day).date()
-                    # If the day has passed in current month, check if user might be referring to next month
-                    if target_date < self.today and day < 15:  # Assuming if day is small, user might mean next month
-                        next_month = self.today.month + 1 if self.today.month < 12 else 1
-                        next_year = self.today.year if self.today.month < 12 else self.today.year + 1
-                        target_date = datetime(next_year, next_month, day).date()
                 except ValueError:
-                    # Invalid date, try next month if current month doesn't have this day
-                    try:
-                        next_month = self.today.month + 1 if self.today.month < 12 else 1
-                        next_year = self.today.year if self.today.month < 12 else self.today.year + 1
-                        target_date = datetime(next_year, next_month, day).date()
-                    except ValueError:
-                        # Still invalid, skip this pattern
-                        continue
+                    # Invalid date, use the last day of current month instead
+                    # Find the last day of the current month
+                    last_day = calendar.monthrange(self.today.year, self.today.month)[1]
+                    logger.log_with_timestamp("TIME ANALYSIS", f"Invalid date {day}/{self.today.month}. Using last day of month: {last_day}/{self.today.month}")
+                    target_date = datetime(self.today.year, self.today.month, last_day).date()
                 
                 if target_date:
                     logger.log_with_timestamp("TIME ANALYSIS", 

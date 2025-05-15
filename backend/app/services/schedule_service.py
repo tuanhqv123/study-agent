@@ -173,19 +173,17 @@ class ScheduleService:
                 month = self.today.month
                 year = self.today.year
                 
-                # If the day is in the past for the current month, try next month
-                target_date = datetime(year, month, day).date()
-                if target_date < self.today and day < 15:
-                    next_month = month + 1 if month < 12 else 1
-                    next_year = year if month < 12 else year + 1
-                    try:
-                        target_date = datetime(next_year, next_month, day).date()
-                    except ValueError:
-                        pass  # Keep the original target_date if next month's date is invalid
+                # Always use current month and year
+                try:
+                    target_date = datetime(year, month, day).date()
+                except ValueError:
+                    # If the date is invalid (e.g. Feb 30), use the last day of the month
+                    last_day = calendar.monthrange(year, month)[1]
+                    logger.log_with_timestamp("DATE EXTRACTION", f"✗ Invalid date {day}/{month}, using last day {last_day}/{month}")
+                    target_date = datetime(year, month, last_day).date()
                 
                 matched_text = day_match.group(0)
-                logger.log_with_timestamp("DATE EXTRACTION", f"✓ Found day-only reference: day={day}, using current month/year")
-                logger.log_with_timestamp("DATE EXTRACTION", f"✓ Extracted date: {target_date.strftime('%d/%m/%Y')}")
+                logger.log_with_timestamp("DATE EXTRACTION", f"✓ Found day-only reference: day={day}, using current month/year: {target_date.strftime('%d/%m/%Y')}")
                 
                 # Check if this is a week query
                 if 'tuan' in question_normalized:
@@ -676,7 +674,7 @@ class ScheduleService:
                 else:
                     formatted_message += "Không có lớp học vào ngày này.\n"
                 
-                formatted_message += "\n"
+                    formatted_message += "\n"
             
             if not has_any_classes:
                 formatted_message += f"Không có lớp học nào trong khoảng thời gian này.\n"

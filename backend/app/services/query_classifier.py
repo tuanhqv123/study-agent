@@ -89,7 +89,6 @@ class QueryClassifier:
 
         # Define exam schedule related patterns in Vietnamese and English
         exam_schedule_keywords = {
-            
             'vn_no_accent': [
                 'lich thi', 'ki thi', 'ky thi', 'ngay thi', 'ca thi', 'phong thi',
                 'lich kiem tra', 'lich ky thi', 'khi nao thi', 'thoi gian thi',
@@ -125,15 +124,32 @@ class QueryClassifier:
             ]
         }
 
-        # Check if the query contains date and exam references (special case)
-        has_date_reference = 'tháng' in text_lower or 'thang' in text_normalized or 'ngày' in text_lower or 'ngay' in text_normalized
+        # Check if the query contains date and subject/exam references
+        has_date_reference = 'tháng' in text_lower or 'thang' in text_normalized or 'ngày' in text_lower or 'ngay' in text_normalized or 'tuần' in text_lower or 'tuan' in text_normalized
         has_exam_reference = 'thi' in text_lower or 'thi' in text_normalized
         has_subject_reference = 'môn' in text_lower or 'mon' in text_normalized
+        has_class_reference = 'học' in text_lower or 'hoc' in text_normalized
         
-        # If query has both date reference and exam/subject reference, prioritize exam schedule
-        if has_date_reference and (has_exam_reference or has_subject_reference):
+        # If query has date reference + exam reference, prioritize exam schedule
+        if has_date_reference and has_exam_reference:
             return True, "thi + date", 'examschedule'
-
+            
+        # If query has date reference + subject reference + class reference, categorize as schedule
+        if has_date_reference and has_subject_reference and has_class_reference:
+            return True, "học + môn + date", 'schedule'
+            
+        # If query has date reference + subject reference without explicit class reference
+        # Check for exam keywords first before defaulting to subject reference
+        if has_date_reference and has_subject_reference:
+            # First check for exam schedule keywords
+            for category in exam_schedule_keywords.values():
+                for keyword in category:
+                    if keyword in text_lower or keyword in text_normalized:
+                        return True, keyword, 'examschedule'
+            
+            # If no exam keywords found, default to schedule
+            return True, "môn + date", 'schedule'
+        
         # Check for exam schedule keywords
         for category in exam_schedule_keywords.values():
             for keyword in category:
