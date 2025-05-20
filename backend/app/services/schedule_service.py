@@ -13,12 +13,6 @@ class ScheduleService:
         self.base_url = "https://uis.ptithcm.edu.vn/api/sch"
         self.auth_service = auth_service
         self.ai_service = ai_service
-        self.time_analyzer = None
-        
-        # Initialize time analyzer if AI service is provided
-        if ai_service:
-            from .time_analyzer import TimeAnalyzer
-            self.time_analyzer = TimeAnalyzer(ai_service)
 
     def set_auth_service(self, auth_service):
         """Set the authentication service for token management
@@ -35,11 +29,6 @@ class ScheduleService:
             ai_service (AiService): The AI service instance
         """
         self.ai_service = ai_service
-        
-        # Initialize or update time analyzer
-        if self.ai_service:
-            from .time_analyzer import TimeAnalyzer
-            self.time_analyzer = TimeAnalyzer(self.ai_service)
         
     def check_auth(self):
         """Check if the service is properly authenticated

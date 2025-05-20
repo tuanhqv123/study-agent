@@ -184,6 +184,26 @@ const Login = () => {
           </form>
         )}
 
+        {/* Nút đăng nhập với Google */}
+        <div className="mt-6 mb-2">
+          <button
+            onClick={handleLoginWithGoogle}
+            disabled={isLoading}
+            className={`w-full flex items-center justify-center gap-2 px-4 py-2 rounded-md font-semibold shadow focus:outline-none focus:ring-2 transition-colors ${
+              isLight
+                ? "bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 focus:ring-blue-200"
+                : "bg-white/10 border border-white/10 text-white hover:bg-white/20 focus:ring-white/20"
+            }`}
+          >
+            <img
+              src="https://www.svgrepo.com/show/475656/google-color.svg"
+              alt="Google"
+              className="h-5 w-5"
+            />
+            Đăng nhập với Google
+          </button>
+        </div>
+
         <div className="mt-4 text-center">
           <button
             onClick={() => navigate("/signup")}
