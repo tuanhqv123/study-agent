@@ -68,6 +68,28 @@ const MessageItem = ({ message }) => {
     );
   };
 
+  // Helper: extract <think>...</think> block and the rest
+  function extractThinkBlock(content) {
+    const thinkRegex = /<think>([\s\S]*?)<\/think>/i;
+    const match = content.match(thinkRegex);
+    if (match) {
+      const thinkContent = match[1].trim();
+      // Remove <think>...</think> from main content
+      const rest = content.replace(thinkRegex, "").trim();
+      return { thinkContent, rest };
+    }
+    return { thinkContent: null, rest: content };
+  }
+
+  let displayContent = message.content || "";
+  let thinkBlock = null;
+  let mainContent = displayContent;
+  if (!isUser && displayContent.includes("<think>")) {
+    const { thinkContent, rest } = extractThinkBlock(displayContent);
+    thinkBlock = thinkContent && thinkContent.length > 0 ? thinkContent : null;
+    mainContent = rest;
+  }
+
   return (
     <div
       className={cn(
@@ -99,6 +121,18 @@ const MessageItem = ({ message }) => {
                 </div>
               )}
 
+              {/* THINK BLOCK (light) */}
+              {thinkBlock && (
+                <div className="mb-3 p-3 rounded-lg bg-yellow-50 border-l-4 border-yellow-400 text-yellow-900 flex items-start gap-2">
+                  <span role="img" aria-label="think" className="mt-0.5">
+                    💡
+                  </span>
+                  <span className="italic whitespace-pre-line">
+                    {thinkBlock}
+                  </span>
+                </div>
+              )}
+
               {!hasContent ? (
                 <div className="prose max-w-none text-gray-500 italic">
                   <p>Không có nội dung</p>
@@ -106,7 +140,7 @@ const MessageItem = ({ message }) => {
               ) : (
                 <div className="prose max-w-none">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {message.content}
+                    {mainContent}
                   </ReactMarkdown>
 
                   {/* Display web search sources */}
@@ -143,6 +177,18 @@ const MessageItem = ({ message }) => {
                   </div>
                 )}
 
+                {/* THINK BLOCK (dark) */}
+                {thinkBlock && (
+                  <div className="mb-3 p-3 rounded-lg bg-yellow-900/20 border-l-4 border-yellow-400 text-yellow-200 flex items-start gap-2">
+                    <span role="img" aria-label="think" className="mt-0.5">
+                      💡
+                    </span>
+                    <span className="italic whitespace-pre-line">
+                      {thinkBlock}
+                    </span>
+                  </div>
+                )}
+
                 {!hasContent ? (
                   <div className="prose prose-invert dark:prose-invert max-w-none text-gray-400 italic">
                     <p>Không có nội dung</p>
@@ -150,7 +196,7 @@ const MessageItem = ({ message }) => {
                 ) : (
                   <div className="prose prose-invert dark:prose-invert max-w-none">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {message.content}
+                      {mainContent}
                     </ReactMarkdown>
 
                     {/* Display web search sources for dark theme */}

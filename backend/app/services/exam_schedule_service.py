@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 import httpx
 from ..utils.logger import Logger
+from .lmstudio_service import parse_time_lmstudio
 
 logger = Logger()
 
@@ -235,157 +236,145 @@ class ExamScheduleService:
         return result
     
     async def process_exam_query(self, question, hoc_ky=None, is_giua_ky=False):
-        """Process an exam schedule query and return formatted results
-        
-        Args:
-            question (str): User's question about exam schedule
-            hoc_ky (str): Semester ID, will use current semester if None
-            is_giua_ky (bool): Whether to get midterm or final exam schedule
-            
-        Returns:
-            dict: Exam schedule information with formatted text
-        """
+        """Process an exam schedule query and return formatted results (AI-first date extraction)"""
         # Get the complete exam schedule
         exam_data = await self.get_exam_schedule_by_semester(hoc_ky, is_giua_ky)
-        
-        # Default response (return all exams)
-        exams_to_display = exam_data['data']['ds_lich_thi'] if exam_data.get('data') and exam_data['data'].get('ds_lich_thi') else []
-        filter_type = "all"
-        filter_value = ""
-        
-        # First check for subject references in the query (highest priority)
-        question_lower = question.lower()
-        
-        # Check for subject queries - common subject-related terms in Vietnamese
-        subject_terms = ["môn", "học phần", "mã môn", "mã học phần", "môn học"]
-        subject_found = False
-        
-        for term in subject_terms:
-            if term in question_lower:
-                # Extract all words after the term, not just the first one
-                parts = question_lower.split(term)
-                if len(parts) > 1:
-                    # Lấy cả cụm từ sau từ khóa, loại bỏ các từ khóa thời gian và thi
-                    remainder = parts[1].strip()
-                    
-                    # Loại bỏ các từ khóa thời gian và thi ở cuối câu
-                    time_keywords = ["khi nào", "bao giờ", "ngày mấy", "lúc nào", "thi", "kiểm tra", "cuối kỳ", "giữa kỳ"]
-                    for kw in time_keywords:
-                        if kw in remainder:
-                            remainder = remainder.split(kw)[0].strip()
-                    
-                    # Tách thành các từ, lấy tối đa 3 từ đầu tiên để có cụm từ môn học hợp lý
-                    words = remainder.split()
-                    if len(words) >= 1:
-                        # Lấy 1-3 từ đầu tiên, tùy theo độ dài của remainder
-                        subject_words = words[:min(3, len(words))]
-                        subject_keyword = " ".join(subject_words)
-                        
-                        logger.log_with_timestamp("EXAM SCHEDULE", f"Extracted subject keyword: '{subject_keyword}'")
-                        
-                        if len(subject_keyword) > 2:  # Vẫn giữ điều kiện từ khóa phải dài hơn 2 ký tự
-                            subject_exams = self.get_exams_by_subject(exam_data, subject_keyword)
-                            
-                            # Thử thêm với từng từ riêng nếu không tìm thấy kết quả với cả cụm
-                            if not subject_exams and len(subject_words) > 1:
-                                logger.log_with_timestamp("EXAM SCHEDULE", f"No results for '{subject_keyword}', trying individual words")
-                                for word in subject_words:
-                                    if len(word) > 2:  # Từ phải dài hơn 2 ký tự
-                                        word_exams = self.get_exams_by_subject(exam_data, word)
-                                        if word_exams:
-                                            logger.log_with_timestamp("EXAM SCHEDULE", f"Found keyword match using single word: '{word}', matches: {len(word_exams)}")
-                                            subject_exams = word_exams
-                                            subject_keyword = word
-                                            break
-                            
-                            if subject_exams:
-                                logger.log_with_timestamp("EXAM SCHEDULE", f"Found subject keyword: '{subject_keyword}', matches: {len(subject_exams)}")
-                                exams_to_display = subject_exams
-                                filter_type = "subject"
-                                filter_value = subject_keyword
-                                subject_found = True
-                                break
-        
-        # Only try date extraction if no subject was found or if we specifically want to filter by date
-        if not subject_found and self.schedule_service:
-            logger.log_with_timestamp("EXAM SCHEDULE", "Using ScheduleService for date extraction")
-            
-            # Extract date from query
-            date_info, date_type, original_text = self.schedule_service.extract_date_references(question)
-            
-            logger.log_with_timestamp("EXAM SCHEDULE", f"Date extraction result: {date_type}, {original_text}")
-            
-            # Only filter if a specific date was actually found in the query (not defaulted to today)
-            if original_text != 'default':
-                # Handle date ranges (weeks, months)
-                if isinstance(date_info, tuple):
-                    start_date, end_date = date_info
-                    logger.log_with_timestamp("EXAM SCHEDULE", 
-                                             f"Date range detected: {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}")
-                    
-                    # Get exams within the date range
-                    exams_to_display = self.get_exams_by_date_range(exam_data, start_date, end_date)
-                    filter_type = "date_range"
-                    filter_value = f"{start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}"
-                else:
-                    # Single date
-                    logger.log_with_timestamp("EXAM SCHEDULE", f"Single date: {date_info.strftime('%d/%m/%Y')}")
-                    date_str = date_info.strftime('%d/%m/%Y')
-                    exams_to_display = self.get_exams_by_date(exam_data, date_str)
-                    filter_type = "date"
-                    filter_value = date_str
+        all_exams = exam_data['data']['ds_lich_thi'] if exam_data.get('data') and exam_data['data'].get('ds_lich_thi') else []
+        # Gọi AI để phân tích thời gian
+        time_info = parse_time_lmstudio(question)
+        type_ = time_info.get('type')
+        value = time_info.get('value')
+        from datetime import datetime, timedelta
+        import calendar
+        def get_week_dates(ref):
+            today = datetime.now().date()
+            if ref == 'current_week':
+                start = today - timedelta(days=today.weekday())
+            elif ref == 'next_week':
+                start = today - timedelta(days=today.weekday()) + timedelta(days=7)
             else:
-                # Nếu không xác định được ngày (mặc định 'today'), trả về tất cả dữ liệu từ API
-                logger.log_with_timestamp("EXAM SCHEDULE", "No specific date found, returning all exam data")
-                exams_to_display = exam_data['data']['ds_lich_thi'] if exam_data.get('data') and exam_data['data'].get('ds_lich_thi') else []
-                filter_type = "all"
-                filter_value = "all_exams"
-        elif not subject_found:
-            # Fallback to basic pattern matching for dates
-            logger.log_with_timestamp("EXAM SCHEDULE", "Using basic pattern matching for date extraction")
-            
-            # Check for date queries - look for DD/MM or DD/MM/YYYY patterns
-            date_patterns = [
-                r'(\d{1,2})[/-](\d{1,2})(?:[/-](\d{4}))?',  # DD/MM or DD/MM/YYYY
-                r'ngày (\d{1,2})[/-](\d{1,2})',              # ngày DD/MM
-                r'ngay (\d{1,2})[/-](\d{1,2})'               # ngay DD/MM
-            ]
-            
-            # Check for date references
-            import re
-            date_found = False
-            for pattern in date_patterns:
-                matches = re.search(pattern, question_lower)
-                if matches:
-                    day = int(matches.group(1))
-                    month = int(matches.group(2))
-                    year = datetime.now().year
-                    if len(matches.groups()) > 2 and matches.group(3):
-                        year = int(matches.group(3))
-                        
+                # Nếu là ngày cụ thể ("25/03"), tìm tuần chứa ngày đó
+                try:
+                    d = datetime.strptime(ref+f'/{today.year}', '%d/%m/%Y').date()
+                except:
+                    d = today
+                start = d - timedelta(days=d.weekday())
+            return [(start + timedelta(days=i)).strftime('%d/%m/%Y') for i in range(7)]
+        def filter_by_dates(exams, dates):
+            return [e for e in exams if e.get('ngay_thi') in dates]
+        def filter_by_weekdays(exams, weekdays, week_dates):
+            # weekdays: ['Monday', ...], week_dates: list of date string in that week
+            weekday_map = {calendar.day_name[i]: i for i in range(7)}
+            result = []
+            for wd in weekdays:
+                if wd in weekday_map:
+                    idx = weekday_map[wd]
+                    if idx < len(week_dates):
+                        date = week_dates[idx]
+                        result.extend([e for e in exams if e.get('ngay_thi') == date])
+            return result
+        exams_to_display = []
+        filter_type = type_
+        filter_value = value
+        if type_ == 'far_time':
+            exams_to_display = []
+        elif type_ == 'day':
+            # value có thể là string hoặc array
+            if isinstance(value, str):
+                # today, tomorrow, yesterday, "25/03", "Monday"...
+                if value in ['today', 'tomorrow', 'yesterday']:
+                    base = datetime.now().date()
+                    if value == 'tomorrow': base += timedelta(days=1)
+                    if value == 'yesterday': base -= timedelta(days=1)
+                    date_str = base.strftime('%d/%m/%Y')
+                    exams_to_display = filter_by_dates(all_exams, [date_str])
+                elif '/' in value:
+                    # "25/03" dạng ngày/tháng
                     try:
-                        # Format date as DD/MM/YYYY
-                        date_str = f"{day:02d}/{month:02d}/{year}"
-                        exams_to_display = self.get_exams_by_date(exam_data, date_str)
-                        filter_type = "date"
-                        filter_value = date_str
-                        date_found = True
-                        break
+                        d = datetime.strptime(value+f'/{datetime.now().year}', '%d/%m/%Y').date()
+                        date_str = d.strftime('%d/%m/%Y')
+                        exams_to_display = filter_by_dates(all_exams, [date_str])
                     except:
-                        continue
-        
-        # Format the filtered exams
+                        exams_to_display = []
+                elif value in calendar.day_name:
+                    # "Monday" ... lấy ngày gần nhất trong tuần này
+                    today = datetime.now().date()
+                    idx = list(calendar.day_name).index(value)
+                    week_dates = get_week_dates('current_week')
+                    if idx < len(week_dates):
+                        date = week_dates[idx]
+                        exams_to_display = filter_by_dates(all_exams, [date])
+                else:
+                    exams_to_display = []
+            elif isinstance(value, list):
+                # Có thể gồm thứ, ngày, week context
+                week_ref = None
+                weekdays = []
+                dates = []
+                for v in value:
+                    if v in ['current_week', 'next_week']:
+                        week_ref = v
+                    elif '/' in v:
+                        dates.append(v)
+                    elif v in calendar.day_name:
+                        weekdays.append(v)
+                if week_ref:
+                    week_dates = get_week_dates(week_ref)
+                    if weekdays:
+                        exams_to_display = filter_by_weekdays(all_exams, weekdays, week_dates)
+                    elif dates:
+                        exams_to_display = filter_by_dates(all_exams, dates)
+                    else:
+                        exams_to_display = filter_by_dates(all_exams, week_dates)
+                else:
+                    # Không có week_ref, chỉ lọc theo ngày/thứ
+                    if weekdays:
+                        week_dates = get_week_dates('current_week')
+                        exams_to_display = filter_by_weekdays(all_exams, weekdays, week_dates)
+                    if dates:
+                        exams_to_display += filter_by_dates(all_exams, dates)
+        elif type_ == 'week':
+            # value có thể là string hoặc array
+            if isinstance(value, str):
+                if value in ['current_week', 'next_week']:
+                    week_dates = get_week_dates(value)
+                    exams_to_display = filter_by_dates(all_exams, week_dates)
+                elif '/' in value:
+                    # "25/03" → lấy tuần chứa ngày đó
+                    try:
+                        d = datetime.strptime(value+f'/{datetime.now().year}', '%d/%m/%Y').date()
+                        week_dates = get_week_dates(value)
+                        exams_to_display = filter_by_dates(all_exams, week_dates)
+                    except:
+                        exams_to_display = []
+            elif isinstance(value, list):
+                week_ref = None
+                weekdays = []
+                dates = []
+                for v in value:
+                    if v in ['current_week', 'next_week']:
+                        week_ref = v
+                    elif '/' in v:
+                        dates.append(v)
+                    elif v in calendar.day_name:
+                        weekdays.append(v)
+                if dates:
+                    # Lấy tuần chứa ngày đầu tiên
+                    try:
+                        d = datetime.strptime(dates[0]+f'/{datetime.now().year}', '%d/%m/%Y').date()
+                        week_dates = get_week_dates(dates[0])
+                    except:
+                        week_dates = get_week_dates('current_week')
+                elif week_ref:
+                    week_dates = get_week_dates(week_ref)
+                else:
+                    week_dates = get_week_dates('current_week')
+                if weekdays:
+                    exams_to_display = filter_by_weekdays(all_exams, weekdays, week_dates)
+                else:
+                    exams_to_display = filter_by_dates(all_exams, week_dates)
+        # Format kết quả
         formatted_exams = self.format_exam_schedule(exams_to_display)
-        
-        # For subject queries, if we found a match, ensure we mention the subject in the response
-        if filter_type == "subject":
-            logger.log_with_timestamp("EXAM SCHEDULE", f"Final result: Subject filter = {filter_value}, found {len(exams_to_display)} exams")
-        else:
-            logger.log_with_timestamp("EXAM SCHEDULE", f"Final result: Filter type = {filter_type}, found {len(exams_to_display)} exams")
-        
-        # Thêm thông tin chi tiết bổ sung vào kết quả
-        is_full_data = (filter_type == "all" and filter_value == "all_exams")
-        
         return {
             'exam_text': formatted_exams,
             'filter_type': filter_type,
@@ -393,6 +382,101 @@ class ExamScheduleService:
             'exam_count': len(exams_to_display),
             'is_midterm': is_giua_ky,
             'query': question,
-            'is_full_data': is_full_data,  # Đánh dấu đây là toàn bộ dữ liệu lịch thi
-            'all_exams': exams_to_display if is_full_data else []  # Bao gồm toàn bộ dữ liệu gốc cho AI
+            'is_full_data': False,
+            'all_exams': exams_to_display
         } 
+
+    async def get_exams_for_query(self, message, hoc_ky):
+        """
+        Phân tích ngày từ message, auto-fill tháng/năm nếu thiếu, lọc exam đúng ngày hoặc trong tuần, trả về danh sách exam và text.
+        """
+        exam_data = await self.get_exam_schedule_by_semester(hoc_ky, False)
+        all_exams = exam_data['data']['ds_lich_thi'] if exam_data.get('data') and exam_data['data'].get('ds_lich_thi') else []
+        time_info = parse_time_lmstudio(message)
+        type_ = time_info.get('type')
+        value = time_info.get('value')
+        today = datetime.now().date()
+        exam_dates = []
+        date_info = ''
+        from datetime import timedelta
+        # Chuẩn hóa value
+        if type_ == 'day':
+            # Nếu value là số (int), ép về string
+            if isinstance(value, int):
+                value = str(value)
+            # Nếu value là string số, auto-fill tháng/năm
+            if isinstance(value, str) and value.isdigit():
+                value = f"{value}/{today.month:02d}/{today.year}"
+            # Nếu value là string ngày/tháng
+            if isinstance(value, str) and '/' in value:
+                try:
+                    d = datetime.strptime(value, '%d/%m/%Y').date()
+                    exam_dates = [d.strftime('%d/%m/%Y')]
+                    date_info = d.strftime('%d/%m/%Y')
+                except:
+                    exam_dates = []
+            elif isinstance(value, list):
+                for v in value:
+                    if isinstance(v, int) or (isinstance(v, str) and v.isdigit()):
+                        v = f"{v}/{today.month:02d}/{today.year}"
+                    if isinstance(v, str) and '/' in v:
+                        try:
+                            d = datetime.strptime(v, '%d/%m/%Y').date()
+                            exam_dates.append(d.strftime('%d/%m/%Y'))
+                        except:
+                            continue
+                if len(exam_dates) == 1:
+                    date_info = exam_dates[0]
+                elif len(exam_dates) > 1:
+                    date_info = f"{exam_dates[0]} to {exam_dates[-1]}"
+        elif type_ == 'week':
+            # value có thể là string hoặc list
+            def get_week_dates(ref):
+                if ref == 'current_week':
+                    start = today - timedelta(days=today.weekday())
+                elif ref == 'next_week':
+                    start = today - timedelta(days=today.weekday()) + timedelta(days=7)
+                else:
+                    try:
+                        d = datetime.strptime(ref+f'/{today.year}', '%d/%m/%Y').date()
+                    except:
+                        d = today
+                    start = d - timedelta(days=d.weekday())
+                return [(start + timedelta(days=i)).strftime('%d/%m/%Y') for i in range(7)]
+            week_dates = []
+            if isinstance(value, str):
+                if value in ['current_week', 'next_week']:
+                    week_dates = get_week_dates(value)
+                elif '/' in value:
+                    try:
+                        d = datetime.strptime(value+f'/{today.year}', '%d/%m/%Y').date()
+                        week_dates = get_week_dates(value)
+                    except:
+                        week_dates = []
+            elif isinstance(value, list):
+                week_ref = None
+                dates = []
+                for v in value:
+                    if v in ['current_week', 'next_week']:
+                        week_ref = v
+                    elif '/' in v:
+                        dates.append(v)
+                if dates:
+                    try:
+                        d = datetime.strptime(dates[0]+f'/{today.year}', '%d/%m/%Y').date()
+                        week_dates = get_week_dates(dates[0])
+                    except:
+                        week_dates = get_week_dates('current_week')
+                elif week_ref:
+                    week_dates = get_week_dates(week_ref)
+                else:
+                    week_dates = get_week_dates('current_week')
+            exam_dates = week_dates
+            if len(exam_dates) > 1:
+                date_info = f"{exam_dates[0]} to {exam_dates[-1]}"
+            elif len(exam_dates) == 1:
+                date_info = exam_dates[0]
+        # Lọc exam
+        filtered_exams = [e for e in all_exams if e.get('ngay_thi') in exam_dates]
+        exam_text = self.format_exam_schedule(filtered_exams)
+        return filtered_exams, exam_text, date_info 

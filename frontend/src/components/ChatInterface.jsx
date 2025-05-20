@@ -322,7 +322,6 @@ const ChatInterface = () => {
         // If this is a web search result, add the sources
         if (data.web_search_results && data.sources) {
           assistantMessage.sources = data.sources;
-          assistantMessage.web_search_results = true;
         }
 
         setMessages((prev) => [...prev, assistantMessage]);
@@ -575,6 +574,7 @@ const ChatInterface = () => {
               userId={user?.id}
               activeFileContext={activeFileContext}
               clearFileContext={clearFileContext}
+              selectedAgent={selectedAgent}
             />
           </div>
         </div>

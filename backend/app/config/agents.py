@@ -1,52 +1,35 @@
 """
 Configuration for different AI agents/models available in the application.
-Each agent is configured with a unique ID, model name, display name, and description.
+Each agent is configured with a unique ID, model name, and display name (trùng với model).
 """
 
 AVAILABLE_AGENTS = {
-    "mistral": {
-        "id": "mistral",
-        "model": "mistralai/mistral-small-3.1-24b-instruct:free",
-        "display_name": "Mistral (Default)",
-        "description": "Mistral Small 3.1 - 24B instruction model. Great for general questions.",
-        "avatar": "🧠", 
+    "qwen3-1.7b": {
+        "id": "qwen3-1.7b",
+        "model": "qwen3-1.7b",
+        "display_name": "qwen3-1.7b",
+        "temperature": 0.7,
+        "is_default": False
+    },
+    "qwen3-4b": {
+        "id": "qwen3-4b",
+        "model": "qwen3-4b",
+        "display_name": "qwen3-4b",
+        "temperature": 0.7,
+        "is_default": False
+    },
+    "qwen3-8b": {
+        "id": "qwen3-8b",
+        "model": "qwen3-8b",
+        "display_name": "qwen3-8b",
         "temperature": 0.7,
         "is_default": True
     },
-    "gemma": {
-        "id": "gemma",
-        "model": "google/gemma-3-4b-it:free",
-        "display_name": "Gemma",
-        "description": "Google's Gemma 3 - 4B instruction model. Balances efficiency and knowledge.",
-        "avatar": "🔍",
+    "gemma-3-1b-it": {
+        "id": "gemma-3-1b-it",
+        "model": "gemma-3-1b-it",
+        "display_name": "gemma-3-1b-it",
         "temperature": 0.7,
-        "is_default": False
-    },
-    "deepseek": {
-        "id": "deepseek",
-        "model": "deepseek/deepseek-chat-v3-0324:free",
-        "display_name": "DeepSeek",
-        "description": "DeepSeek Chat v3 - Excels at technical topics and detailed explanations.",
-        "avatar": "🔬",
-        "temperature": 0.6,
-        "is_default": False
-    },
-    "llama": {
-        "id": "llama",
-        "model": "meta-llama/llama-4-maverick:free",
-        "display_name": "Llama 4",
-        "description": "Meta's Llama 4 Maverick model - Creative and diverse responses.",
-        "avatar": "🦙",
-        "temperature": 0.75,
-        "is_default": False
-    },
-    "qwen": {
-        "id": "qwen",
-        "model": "qwen/qwen3-30b-a3b:free",
-        "display_name": "Qwen",
-        "description": "Alibaba's Qwen3 30B model - Very knowledgeable and precise.",
-        "avatar": "⚡",
-        "temperature": 0.65,
         "is_default": False
     }
 }

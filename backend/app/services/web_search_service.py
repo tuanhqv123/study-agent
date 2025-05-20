@@ -30,14 +30,18 @@ class WebSearchService:
             logger.log_with_timestamp('WEB_SEARCH', f'Searching web for: "{query}"')
             
             # Call the Brave Search API directly
+            brave_params = {"q": query, "count": 10, "search_lang": "vi"}
+            brave_headers = {
+                "Accept": "application/json",
+                "X-Subscription-Token": self.BRAVE_API_KEY
+            }
+            print('[BRAVE_SEARCH_PAYLOAD] params:', brave_params)
+            print('[BRAVE_SEARCH_PAYLOAD] headers:', brave_headers)
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(
                     self.BRAVE_API_URL,
-                    params={"q": query, "count": 10, "search_lang": "vi"},
-                    headers={
-                        "Accept": "application/json",
-                        "X-Subscription-Token": self.BRAVE_API_KEY
-                    }
+                    params=brave_params,
+                    headers=brave_headers
                 )
                 
                 # Check if response is successful
@@ -53,9 +57,23 @@ class WebSearchService:
                 
                 # Log the raw response structure for debugging
                 try:
-                    logger.log_with_timestamp('WEB_SEARCH_RAW', f'Raw API structure: {json.dumps(result, indent=2)[:500]}...')
+                    raw_json = json.dumps(result, indent=2)[:1000]
+                    logger.log_with_timestamp('WEB_SEARCH_RAW', f'Raw API structure: {raw_json}')
+                    print('[WEB_SEARCH_RAW]', raw_json)
+                    if 'web' not in result:
+                        logger.log_with_timestamp('WEB_SEARCH_RAW', 'No "web" key in Brave API response!')
+                        print('[WEB_SEARCH_RAW] No "web" key in Brave API response!')
+                    else:
+                        web_results = result['web'].get('results', None)
+                        if web_results is None:
+                            logger.log_with_timestamp('WEB_SEARCH_RAW', 'No "results" key in "web" object!')
+                            print('[WEB_SEARCH_RAW] No "results" key in "web" object!')
+                        else:
+                            logger.log_with_timestamp('WEB_SEARCH_RAW', f'Number of web results: {len(web_results)}')
+                            print(f'[WEB_SEARCH_RAW] Number of web results: {len(web_results)}')
                 except Exception as e:
                     logger.log_with_timestamp('WEB_SEARCH_RAW', f'Error logging raw structure: {str(e)}')
+                    print('[WEB_SEARCH_RAW] Error logging raw structure:', str(e))
                 
                 logger.log_with_timestamp('WEB_SEARCH', 'Successfully received search results')
                 

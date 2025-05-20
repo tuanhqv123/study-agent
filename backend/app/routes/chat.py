@@ -80,8 +80,28 @@ async def chat():
         if web_search_enabled:
             logger.log_with_timestamp("WEB_SEARCH_ENABLED", "Using web search for query", "")
             
-            # Get chat_id from request
+            # Lấy chat_id nếu có
             chat_id = data.get('chat_id')
+            # Lấy lịch sử tin nhắn từ database nếu có chat_id
+            db_history = []
+            if chat_id:
+                try:
+                    result = supabase.table('messages') \
+                        .select('*') \
+                        .eq('chat_id', chat_id) \
+                        .order('created_at') \
+                        .execute()
+                    if result and hasattr(result, 'data'):
+                        db_history = result.data
+                        # Chuyển đổi về format phù hợp cho AI (role/content)
+                        db_history = [
+                            {"role": msg.get("role", "user"), "content": msg.get("content", "")}
+                            for msg in db_history if msg.get("content")
+                        ]
+                except Exception as e:
+                    logger.log_with_timestamp("DB_HISTORY_ERROR", f"Error fetching chat history: {e}")
+            # Gộp lịch sử db với conversation_history từ frontend (nếu có)
+            conversation_history = db_history + conversation_history
             
             # Log chat session info with more details
             if chat_id:
@@ -180,328 +200,128 @@ async def chat():
                 'agent_id': agent_id
             })
         
+        # Khởi tạo exam_data để tránh lỗi referenced before assignment
+        exam_data = None
         # Handle schedule-related queries with date extraction
-        if classification_result['category'] == 'schedule' or classification_result['category'] == 'date_query':
+        if classification_result['category'] == 'date_query' or classification_result['category'] == 'schedule':
             # Log that we're handling a schedule/date query
             logger.log_with_timestamp(
                 "DATE QUERY", 
                 f"Processing date query", 
                 f"Query type: {classification_result['category']}"
             )
-            
             try:
                 # Get university credentials from request
                 credentials = data.get('university_credentials')
                 if not credentials:
                     raise Exception("Vui lòng cập nhật thông tin đăng nhập vào hệ thống trường học trong phần Thiết lập.")
-                    
                 # Login to PTIT system
                 success, error = ptit_auth_service.login(
                     credentials['university_username'],
                     credentials['university_password']
                 )
-                
                 if not success:
                     raise Exception("Không thể đăng nhập vào hệ thống trường học. Vui lòng kiểm tra lại thông tin đăng nhập.")
-                    
                 # Get current semester
                 current_semester, semester_error = ptit_auth_service.get_current_semester()
                 if semester_error:
                     raise Exception(f"Không thể lấy thông tin học kỳ: {semester_error}")
-                
                 # Process both class schedule and exam schedule for the same date
-                # First, process class schedule
-                schedule_result = await schedule_service.get_schedule_by_semester(current_semester['hoc_ky'])
-                date_info_tuple = schedule_service.extract_date_references(message)
-                
-                # Add safety check to handle None value from extract_date_references
-                if date_info_tuple is None:
-                    logger.log_with_timestamp(
-                        "DATE EXTRACTION ERROR", 
-                        "Failed to extract date information from message",
-                        f"Message: {message}"
-                    )
-                    # Default to today's date if extraction fails
-                    today = datetime.now().date()
-                    date_info_tuple = (today, 'today', 'default')
-                    logger.log_with_timestamp(
-                        "DATE EXTRACTION", 
-                        f"Using fallback date: {today.strftime('%d/%m/%Y')}",
-                        "Type: today | Original text: default"
-                    )
-                
-                date_info_value = date_info_tuple[0]  # Get the actual date value (can be a date or a tuple of dates)
-                
-                # Log the extracted date information
-                if isinstance(date_info_value, tuple):
-                    start_date, end_date = date_info_value
-                    logger.log_with_timestamp(
-                        "DATE EXTRACTION", 
-                        f"Date range: {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}",
-                        f"Type: {date_info_tuple[1]}"
-                    )
-                    formatted_date_info = f"{start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}"
-                    
-                    # For ranges, we'll focus on class schedule and not exam schedule
-                    # (exam schedules are usually more relevant for specific dates)
-                    if date_info_tuple[1] in ['this_week', 'next_week', 'last_week', 'specific_week']:
-                        all_classes = []
-                        formatted_days = []
-                        days_in_range = (end_date - start_date).days + 1
-                        days_to_fetch = min(days_in_range, 7)  # Limit to 7 days for week queries
-                        
-                        # Check each day in the range for classes
-                        for i in range(days_to_fetch):
-                            current_date = start_date + timedelta(days=i)
-                            daily_classes = schedule_service.get_class_schedule(schedule_result, current_date)
-                            
-                            # Format each day with its classes
-                            weekday_vn = schedule_service.get_vietnamese_weekday(current_date.weekday())
-                            day_formatted = f"--- {weekday_vn}, ngày {current_date.strftime('%d/%m/%Y')} ---\n"
-                            
-                            if daily_classes:
-                                for class_info in daily_classes:
-                                    # Add date information to each class
-                                    class_info['date'] = current_date.strftime('%d/%m/%Y')
-                                    class_info['day_of_week'] = current_date.strftime('%A')
-                                    all_classes.append(class_info)
-                        
-                                    # Add class details to the formatted day
-                                    day_formatted += f"- {class_info.get('ten_mon', '')} ({class_info.get('ma_mon', '')})\n"
-                                    
-                                    if class_info.get('ten_mon_eg'):
-                                        day_formatted += f"  {class_info.get('ten_mon_eg')}\n"
-                                        
-                                    day_formatted += f"  {class_info.get('time', '')}\n"
-                                    day_formatted += f"  Phòng {class_info.get('room', '')}\n"
-                                    day_formatted += f"  {class_info.get('lecturer', '')}\n\n"
-                            else:
-                                day_formatted += "Không có lớp học vào ngày này.\n\n"
-                            
-                            formatted_days.append(day_formatted)
-                        
-                        # Store both the raw class data and the formatted weekly view
-                        schedule_text = all_classes
-                        formatted_weekly_schedule = "\n".join(formatted_days)
-                        
-                        # Also get exam schedules for the date range
-                        logger.log_with_timestamp(
-                            "EXAM SCHEDULE", 
-                            f"Getting exam schedules for week: {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}"
-                        )
-                        
-                        # Get exam data for the date range
-                        exam_data = await exam_schedule_service.get_exam_schedule_by_semester(current_semester['hoc_ky'], False)
-                        exams_in_range = exam_schedule_service.get_exams_by_date_range(exam_data, start_date, end_date)
-                        exam_text = exam_schedule_service.format_exam_schedule(exams_in_range) if exams_in_range else None
-                        exam_count = len(exams_in_range)
-                        
-                        logger.log_with_timestamp(
-                            "EXAM SCHEDULE", 
-                            f"Found {exam_count} exams in the week"
-                        )
-                    else:
-                        # For other date ranges, just get the first day
-                        schedule_text = schedule_service.get_class_schedule(schedule_result, start_date)
-                        formatted_weekly_schedule = None
-                        
-                        # Also get exam schedule for the start date
-                        date_str = start_date.strftime('%d/%m/%Y')
-                        exam_data = await exam_schedule_service.get_exam_schedule_by_semester(current_semester['hoc_ky'], False)
-                        exams_on_date = exam_schedule_service.get_exams_by_date(exam_data, date_str)
-                        exam_text = exam_schedule_service.format_exam_schedule(exams_on_date) if exams_on_date else None
-                        exam_count = len(exams_on_date)
-                else:  # It's a single date
-                    formatted_date_info = date_info_value.strftime('%d/%m/%Y')
-                    logger.log_with_timestamp(
-                        "DATE EXTRACTION", 
-                        f"Single date: {formatted_date_info}",
-                        f"Type: {date_info_tuple[1]}"
-                    )
-                    
-                    # Get class schedule for the date
-                    schedule_text = schedule_service.get_class_schedule(schedule_result, date_info_value)
-                    
-                    # Also get exam schedule for the same date
-                    date_str = date_info_value.strftime('%d/%m/%Y')
-                    exam_data = await exam_schedule_service.get_exam_schedule_by_semester(current_semester['hoc_ky'], False)
-                    exams_on_date = exam_schedule_service.get_exams_by_date(exam_data, date_str)
-                    exam_text = exam_schedule_service.format_exam_schedule(exams_on_date) if exams_on_date else None
-                    exam_count = len(exams_on_date)
-                
-                schedule_result = {
-                    'date_info': formatted_date_info,
-                    'date_type': date_info_tuple[1],
-                    'original_text': date_info_tuple[2],
-                    'schedule_text': schedule_text,
-                    'formatted_weekly_schedule': formatted_weekly_schedule if isinstance(date_info_value, tuple) else None,
-                    'exam_text': exam_text,
-                    'exam_count': exam_count
-                }
-                
-                # Log the processing result (reduced verbosity)
-                logger.log_with_timestamp(
-                    "SCHEDULE RESULT", 
-                    f"Date: {schedule_result['date_info']} | Additional info: Type: {schedule_result['date_type']} | Original text: {schedule_result['original_text'][:10]}..."
-                )
-                
-                # Format the schedule data for display
-                has_classes = isinstance(schedule_result['schedule_text'], list) and len(schedule_result['schedule_text']) > 0
-                has_exams = exam_count > 0
-                
-                if not has_classes and not has_exams:
-                    # No classes or exams found for this date
-                    if date_info_tuple[2] == 'default':
-                        # User didn't specify a date clearly
-                        schedule_prompt = {
-                            "role": "system",
-                            "content": f"""
-                            You are a helpful study assistant for university students. The student asked about their schedule but didn't specify a clear date.
-                            Their query was: "{message}"
-                            
-                            Please respond in Vietnamese, politely asking them to specify which day or date they're asking about.
-                            Use a professional and respectful tone appropriate for university students - avoid using "em" and instead use more formal language.
-                            For example, they could clarify with "thứ 7 tuần này", "thứ 2 tuần sau", or a specific date.
-                            Your response should be friendly and helpful, encouraging them to provide more details so you can assist them better.
-                            """
-                        }
-                    else:
-                        # We understood the date, but nothing was found
-                        # Get friendly date representation
-                        if isinstance(date_info_value, tuple):
-                            date_repr = f"từ {formatted_date_info}"
-                        else:
-                            weekday_vn = schedule_service.get_vietnamese_weekday(date_info_value.weekday())
-                            date_repr = f"{weekday_vn}, ngày {formatted_date_info}"
-                        
-                        schedule_prompt = {
-                            "role": "system",
-                            "content": f"""
-                            You are a helpful study assistant. The student asked about their schedule for {date_repr}.
-                            After checking the system, no classes or exams were found for this date.
-                            
-                            Please respond in Vietnamese, letting them know there are no classes or exams scheduled for {date_repr}.
-                            Offer to check another date if they'd like. Be helpful and friendly in your response.
-                            """
-                        }
+                schedule_result = await schedule_service.process_schedule_query(message, current_semester['hoc_ky'])
+                # Nếu là date_query, luôn luôn lấy toàn bộ lịch thi học kỳ
+                if classification_result['category'] == 'date_query':
+                    filtered_exams, exam_text, exam_date_info = await exam_schedule_service.get_exams_for_query(message, current_semester['hoc_ky'])
+                    exam_count = len(filtered_exams)
                 else:
-                    # We have schedule and/or exam data to share
-                    # Format schedule data
-                    formatted_schedule = ""
+                    exam_result = await exam_schedule_service.process_exam_query(message, current_semester['hoc_ky'], False)
+                    if isinstance(exam_result, list):
+                        exam_text = exam_schedule_service.format_exam_schedule(exam_result)
+                        exam_count = len(exam_result)
+                    elif isinstance(exam_result, dict):
+                        exam_text = exam_result.get('exam_text')
+                        exam_count = exam_result.get('exam_count', 0)
+                    else:
+                        exam_text = None
+                        exam_count = 0
+                    exam_data = None
+                has_exams = exam_count > 0
+                # Format lịch học
+                all_schedules = schedule_result.get('all_schedules', {})
+                formatted_weekly_schedule = None
+                has_classes = False
+                if 'daily_schedules' in all_schedules:
+                    daily_schedules = all_schedules['daily_schedules']
+                    days_with_classes = [day for day in daily_schedules if day.get('classes')]
+                    has_classes = len(days_with_classes) > 0
                     if has_classes:
-                        # Format class schedule
-                        if isinstance(schedule_result['schedule_text'], list):
-                            for i, class_info in enumerate(schedule_result['schedule_text'], 1):
-                                # Add class details
-                                formatted_schedule += f"{i}. {class_info.get('ten_mon', '')} ({class_info.get('ma_mon', '')})\n"
-                                
-                                # Add English subject name if available
-                                if class_info.get('ten_mon_eg'):
-                                    formatted_schedule += f"    {class_info.get('ten_mon_eg')}\n"
-                                    
-                                # Add class time
-                                formatted_schedule += f"    {class_info.get('time', '')}\n"
-                                
-                                # Add room information
-                                formatted_schedule += f"    Phòng {class_info.get('room', '')}\n"
-                                
-                                # Add lecturer information with ID
-                                formatted_schedule += f"    {class_info.get('lecturer', '')}"
-                                if class_info.get('ma_giang_vien'):
-                                    formatted_schedule += f" (Mã GV: {class_info.get('ma_giang_vien')})"
-                                formatted_schedule += "\n"
-                                
-                                # Add credit hours if available
-                                if class_info.get('so_tin_chi'):
-                                    formatted_schedule += f"    Số tín chỉ: {class_info.get('so_tin_chi')}\n"
-
-                                # Add class date and thu_kieu_so
-                                formatted_schedule += f"    Ngày học: {class_info.get('ngay_hoc', '')}\n"
-                                thu_kieu_so = class_info.get('thu_kieu_so', '')
-                                if thu_kieu_so:
-                                    formatted_schedule += f"    Thứ {thu_kieu_so}\n"
-                                    
-                                formatted_schedule += "\n"
-                    
-                    # Prepare combined prompt with both schedule and exam info
-                    combined_data = ""
-                    
-                    if has_classes:
-                        if schedule_result.get('formatted_weekly_schedule'):
-                            # For week-based queries, use the formatted weekly view
-                            combined_data += "LỊCH HỌC TRONG TUẦN:\n" + schedule_result['formatted_weekly_schedule'] + "\n"
-                        else:
-                            # For single-day queries, use the standard format
-                            combined_data += "LỊCH HỌC:\n" + formatted_schedule + "\n"
-                    
-                    if has_exams:
-                        combined_data += "LỊCH THI:\n" + schedule_result['exam_text']
-                    
-                    if not combined_data.strip():
-                        combined_data = "Không tìm thấy thông tin lớp học hoặc lịch thi cho ngày này."
-                    
-                    schedule_prompt = {
-                        "role": "system",
-                        "content": f"""
-                        You are a helpful study assistant. The student asked about their schedule.
-                        Here is the schedule information retrieved from the system:
-
-                        {combined_data}
-
-                        Please respond in Vietnamese, summarizing this information in a natural, 
-                        conversational way. If this is a week-based schedule, make sure to mention 
-                        that this is the schedule for the entire week from {schedule_result['date_info']}.
-                        
-                        Add any relevant reminders about being on time for classes or exams. 
-                        
-                        If there are both classes and exams, make sure to clearly distinguish between them.
-                        If there are exams, emphasize their importance and suggest preparing well in advance.
-                        
-                        Keep your response concise and friendly.
-                        """
-                    }
-                
-                # Get AI to format the response nicely
+                        formatted_weekly_schedule = "\n".join([
+                            f"--- {schedule_service.get_vietnamese_weekday(datetime.strptime(day['date'], '%Y-%m-%d').weekday())}, {datetime.strptime(day['date'], '%Y-%m-%d').strftime('%d/%m/%Y')} ---\n" + schedule_service.format_schedule_for_display(day, include_header=False)
+                            for day in days_with_classes
+                        ])
+                elif 'schedule' in all_schedules:
+                    schedule = all_schedules['schedule']
+                    has_classes = bool(schedule.get('classes'))
+                    formatted_weekly_schedule = schedule_service.format_schedule_for_display(schedule, include_header=True) if has_classes else None
+                # Tạo prompt gửi cho AI
+                combined_data = ""
+                if has_classes:
+                    combined_data += "LỊCH HỌC (chỉ liệt kê các ngày có lớp):\n" + formatted_weekly_schedule + "\n"
+                # Luôn luôn add toàn bộ lịch thi nếu là date_query
+                if classification_result['category'] == 'date_query':
+                    combined_data += "Đây là LỊCH THI:\n" + (exam_text or "Không có lịch thi nào phù hợp với yêu cầu.")
+                elif has_exams:
+                    combined_data += "LỊCH THI:\n" + exam_text
+                # Nếu cả lịch học và lịch thi đều không có, trả lời lịch thi trống
+                if not has_classes and not has_exams:
+                    combined_data = "Hiện tại bạn không có lịch thi hoặc lịch học nào trong hệ thống."
+                elif not combined_data.strip():
+                    combined_data = "Không tìm thấy thông tin lớp học hoặc lịch thi cho ngày này."
+                schedule_prompt = {
+                    "role": "system",
+                    "content": f"""
+                    Bạn là trợ lý học tập cho sinh viên đại học. Dưới đây là thông tin lịch lấy từ hệ thống:{combined_data}Dựa trên lịch sử trò chuyện hãy trả lời đầy đủ, phải liệt kê chi tiết từng ngày và từng lớp học có trong dữ liệu trên. Nếu có lịch thi, hãy liệt kê rõ ràng từng môn thi, ngày thi, phòng thi. Nếu là lịch tuần, phải nhấn mạnh đây là lịch cho các ngày có lớp trong tuần từ {schedule_result['date_info']}.
+                    Trả lời bằng tiếng Việt, văn phong tự nhiên, thân thiện, nhưng tuyệt đối không được tóm tắt hay rút gọn nội dung lịch học.
+                    """
+                }
+                print("[SCHEDULE PROMPT]", f"Prompt content:\n{schedule_prompt['content']}")
+                print("[SCHEDULE DATA]", f"formatted_weekly_schedule:\n{formatted_weekly_schedule}")
+                # Tạo messages list: chỉ system prompt + user message hiện tại
+                messages = [schedule_prompt, {"role": "user", "content": message}]
+                # Gọi AI với temperature 0.8
                 try:
+                    agent_config = get_agent(agent_id)
+                    agent_config["temperature"] = 0.8
                     enhanced_response, _ = ai_service.chat_with_ai(
                         message, 
-                        [schedule_prompt],
+                        messages,
                         agent_id
                     )
                 except Exception as ai_error:
-                    # Log the error and generate fallback response
                     logger.log_with_timestamp("SCHEDULE AI ERROR", f"Failed to get AI response: {str(ai_error)}")
-                    
-                    # Generate a simple fallback response
-                    if not has_classes and not has_exams:
-                        enhanced_response = f"Xin chào, không có lớp học hay lịch thi nào vào {formatted_date_info}. Bạn có muốn kiểm tra ngày khác không?"
-                    else:
-                        enhanced_response = f"Lịch của bạn vào {formatted_date_info}:\n\n{combined_data}\n\nHãy chuẩn bị thật kỹ và đến đúng giờ nhé!"
-                
-                # Add the information to the conversation history
+                    enhanced_response = f"Lịch của bạn:\n\n{combined_data}\n\nHãy chuẩn bị thật kỹ và đến đúng giờ nhé!"
                 conversation_history.append({
                     "role": "system",
-                    "content": f"Schedule data: {schedule_result.get('schedule_text')}\nExam data: {schedule_result.get('exam_text')}"
+                    "content": f"Schedule data: {schedule_result.get('schedule_text')}\nExam data: {exam_text}"
                 })
                 conversation_history.append({
                     "role": "assistant",
                     "content": enhanced_response
                 })
-                
                 return jsonify({
                     'response': enhanced_response,
                     'schedule_data': schedule_result,
+                    'exam_data': exam_data,
                     'conversation_history': conversation_history,
                     'query_type': 'schedule',
                     'agent_id': agent_id
                 })
-                
             except Exception as e:
                 error_msg = f"Error processing schedule/exam data: {str(e)}"
                 logger.log_with_timestamp("SCHEDULE ERROR", error_msg)
                 return jsonify({
                     'error': error_msg,
                     'schedule_data': None,
+                    'exam_data': None,
                     'conversation_history': conversation_history,
                     'query_type': 'schedule',
                     'agent_id': agent_id
@@ -509,139 +329,65 @@ async def chat():
         
         # Handle exam schedule queries
         if classification_result['category'] == 'examschedule':
-            # Log that we're handling an exam schedule query
             logger.log_with_timestamp(
                 "EXAM SCHEDULE QUERY", 
                 f"Processing exam schedule request", 
                 f"Current time: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
             )
-            
             try:
-                # Get university credentials from request
                 credentials = data.get('university_credentials')
                 if not credentials:
                     raise Exception("Vui lòng cập nhật thông tin đăng nhập vào hệ thống trường học trong phần Thiết lập.")
-                    
-                # Login to PTIT system
                 success, error = ptit_auth_service.login(
                     credentials['university_username'],
                     credentials['university_password']
                 )
-                
                 if not success:
                     raise Exception("Không thể đăng nhập vào hệ thống trường học. Vui lòng kiểm tra lại thông tin đăng nhập.")
-                    
-                # Get current semester
                 current_semester, semester_error = ptit_auth_service.get_current_semester()
                 if semester_error:
                     raise Exception(f"Không thể lấy thông tin học kỳ: {semester_error}")
-                
-                # Process the exam schedule query
-                exam_result = await exam_schedule_service.process_exam_query(
-                    message, 
-                    current_semester['hoc_ky'],
-                    False  # Not midterm by default, could be made configurable
-                )
-                
-                # Log the exam processing result
-                logger.log_with_timestamp(
-                    "EXAM SCHEDULE RESULT", 
-                    f"Filter: {exam_result['filter_type']} = {exam_result['filter_value']}",
-                    f"Found {exam_result['exam_count']} exams"
-                )
-                
-                # Create a contextualized response using AI
-                if exam_result['exam_count'] == 0:
-                    # No exams found
-                    exam_prompt = {
-                        "role": "system",
-                        "content": f"""
-                        You are a helpful study assistant. The student asked about their exam schedule.
-                        After checking the system, no exams were found matching their query: "{message}"
-                        
-                        Please respond in Vietnamese, letting them know no exams were found matching their criteria.
-                        If their query was for a specific date or date range ({exam_result['filter_value']}), 
-                        mention that time period in your response.
-                        Offer to check another date or subject if they'd like. Be helpful and friendly in your response.
-                        """
-                    }
-                else:
-                    # We have exam data to share
-                    # If it's a date range query, include that information
-                    date_info = ""
-                    week_context = ""
-                    
-                    if exam_result.get('is_full_data'):
-                        date_info = "cho toàn bộ học kỳ"
-                        week_context = "Đây là danh sách tất cả các kỳ thi trong học kỳ. Hãy tóm tắt thông tin và trả lời câu hỏi của người dùng một cách chi tiết. "
-                    elif exam_result['filter_type'] == "date_range":
-                        date_info = f"cho khoảng thời gian {exam_result['filter_value']}"
-                        
-                        # Add additional context for week-based queries
-                        if "to" in exam_result['filter_value']:
-                            week_context = "Đây là danh sách tất cả các kỳ thi trong khoảng thời gian này. "
-                    elif exam_result['filter_type'] == "date":
-                        date_info = f"cho ngày {exam_result['filter_value']}"
-                    
-                    exam_prompt = {
-                        "role": "system",
-                        "content": f"""
-                        You are a helpful study assistant. The student asked about their exam schedule: "{message}"
-                        Here is the exam information retrieved from the system {date_info}:
-
-                        {exam_result['exam_text']}
-
-                        {week_context}Please respond in Vietnamese, summarizing this information in a natural, 
-                        conversational way. Mention the date or date range if provided, along with any upcoming exams,
-                        their format, location and time.
-                        
-                        If this is the full semester's exam schedule, analyze the schedule to provide helpful insights like:
-                        - Which exams are coming up soonest
-                        - Any periods with multiple exams close together (exam clusters)
-                        - Overall distribution of exams throughout the semester
-                        
-                        Add any relevant reminders about being prepared for exams.
-                        Keep your response concise and friendly.
-                        """
-                    }
-                
+                # Lấy toàn bộ lịch thi học kỳ
+                exam_data = await exam_schedule_service.get_exam_schedule_by_semester(current_semester['hoc_ky'], False)
+                exam_list = exam_data['data']['ds_lich_thi'] if exam_data.get('data') and exam_data['data'].get('ds_lich_thi') else []
+                exam_text = exam_schedule_service.format_exam_schedule(exam_list)
+                exam_count = len(exam_list)
+                # Prompt: truyền toàn bộ lịch thi cho AI
+                exam_prompt = {
+                    "role": "system",
+                    "content": f"""
+                    Bạn là trợ lý học tập cho sinh viên đại học. Dưới đây là toàn bộ lịch thi học kỳ lấy từ hệ thống:
+                    {exam_text}
+                    Hãy tổng hợp và trả lời tổng quan về lịch thi cho sinh viên.đảm bảo đầy đủ môn thi, ngày thi, phòng thi, giờ thi,thời gian làm bài. Trả lời bằng tiếng Việt, văn phong tự nhiên.
+                    """
+                }
                 logger.log_with_timestamp("EXAM SCHEDULE PROMPT", exam_prompt['content'])
-                
-                # Get AI to format the response nicely
+                # Tạo messages list: chỉ system prompt + user message hiện tại
+                messages = [exam_prompt, {"role": "user", "content": message}]
                 try:
                     enhanced_response, _ = ai_service.chat_with_ai(
                         message, 
-                        [exam_prompt],
+                        messages,
                         agent_id
                     )
                 except Exception as ai_error:
-                    # Log the error
                     logger.log_with_timestamp("EXAM SCHEDULE AI ERROR", f"Failed to get AI response: {str(ai_error)}")
-                    
-                    # Generate a simple fallback response in Vietnamese
-                    if exam_result['exam_count'] == 0:
-                        enhanced_response = "Xin chào, không tìm thấy lịch thi nào phù hợp với yêu cầu của bạn. Bạn có muốn tìm kiếm với thông tin khác không?"
-                    else:
-                        enhanced_response = f"Lịch thi của bạn:\n\n{exam_result['exam_text']}\n\nHãy chuẩn bị thật kỹ và đến đúng giờ nhé!"
-                
-                # Add the exam information to the conversation history
+                    enhanced_response = f"Lịch thi của bạn:\n\n{exam_text}\n\nHãy chuẩn bị thật kỹ và đến đúng giờ nhé!"
                 conversation_history.append({
                     "role": "system",
-                    "content": exam_result['exam_text']
+                    "content": exam_text
                 })
                 conversation_history.append({
                     "role": "assistant",
                     "content": enhanced_response
                 })
-                
                 return jsonify({
                     'response': enhanced_response,
-                    'exam_data': exam_result,
+                    'exam_data': exam_data,
                     'conversation_history': conversation_history,
                     'query_type': 'examschedule',
                     'agent_id': agent_id
                 })
-                
             except Exception as e:
                 error_msg = f"Error processing exam schedule: {str(e)}"
                 logger.log_with_timestamp("EXAM SCHEDULE ERROR", error_msg)
@@ -670,34 +416,21 @@ async def chat():
             )
         }
         
-        # Add system message to the beginning of the conversation history
-        enhanced_history = [system_message]
-        if conversation_history:
-            enhanced_history.extend(conversation_history)
-        
-        # Log the AI request
+        # Luôn chỉ truyền system + user message hiện tại cho AI
+        messages = [system_message, {"role": "user", "content": message}]
         logger.log_with_timestamp(
             "AI REQUEST", 
             message, 
-            f"Query type: {classification_result['category']} | History length: {len(conversation_history)} messages"
+            f"Query type: {classification_result['category']} | NO HISTORY (thinking mode)"
         )
-        
-        # Record start time
         start_time = time.time()
-        
-        # Get response from AI service - pass the agent_id
-        response, updated_history = ai_service.chat_with_ai(message, enhanced_history, agent_id)
-        
-        # Calculate response time
+        response, updated_history = ai_service.chat_with_ai(message, messages, agent_id)
         time_taken = round(time.time() - start_time, 2)
-        
-        # Log the AI response with timing
         logger.log_with_timestamp(
             "AI RESPONSE", 
             response, 
             f"Time: {time_taken}s"
         )
-        
         return jsonify({
             'response': response, 
             'conversation_history': updated_history,
