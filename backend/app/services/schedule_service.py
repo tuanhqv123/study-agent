@@ -37,7 +37,7 @@ class ScheduleService:
             bool: True if authenticated, False otherwise
         """
         return self.auth_service is not None and self.auth_service.access_token is not None
-        
+    
     def normalize_vietnamese(self, text):
         """
         Convert text with diacritics to non-diacritic form to make matching more robust
@@ -511,15 +511,15 @@ class ScheduleService:
             print("[DEBUG] schedule_dates is empty, fallback to current week")
             schedule_dates = get_week_dates('current_week')
         # Lấy lịch học cho các ngày đã xác định
-        all_daily_schedules = []
-        has_any_classes = False
+            all_daily_schedules = []
+            has_any_classes = False
         for d in schedule_dates:
             daily_schedule = await self.get_schedule(d, hoc_ky)
             print(f"[DEBUG] daily_schedule for {d}: {daily_schedule}")
-            if daily_schedule:
-                all_daily_schedules.append(daily_schedule)
+                if daily_schedule:
+                    all_daily_schedules.append(daily_schedule)
                 if daily_schedule.get("classes"):
-                    has_any_classes = True
+                        has_any_classes = True
         print("[DEBUG] all_daily_schedules:", all_daily_schedules)
         # Format kết quả
         if len(schedule_dates) > 1:
@@ -533,7 +533,7 @@ class ScheduleService:
                     formatted_message += self.format_schedule_for_display(daily_schedule, include_header=False)
                 else:
                     formatted_message += "Không có lớp học vào ngày này.\n"
-                formatted_message += "\n"
+                    formatted_message += "\n"
             if not has_any_classes:
                 formatted_message += f"Không có lớp học nào trong khoảng thời gian này.\nVui lòng kiểm tra lại lịch học trên hệ thống quản lý học tập của trường."
             date_range_info = f"{schedule_dates[0].strftime('%d/%m/%Y')} to {schedule_dates[-1].strftime('%d/%m/%Y')}"

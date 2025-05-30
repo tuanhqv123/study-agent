@@ -326,7 +326,7 @@ class ExamScheduleService:
                         exams_to_display = filter_by_dates(all_exams, dates)
                     else:
                         exams_to_display = filter_by_dates(all_exams, week_dates)
-                else:
+            else:
                     # Không có week_ref, chỉ lọc theo ngày/thứ
                     if weekdays:
                         week_dates = get_week_dates('current_week')

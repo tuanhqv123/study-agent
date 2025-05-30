@@ -347,6 +347,7 @@ Các flow này đều có thể mở rộng, thay đổi model, thêm nguồn d�
    ```
 
 5. **Tạo vector embedding và lưu vào database**:
+
    ```python
    def create_and_store_embeddings(self, chunks, file_id, user_id):
        """Tạo và lưu vector embedding cho các chunks"""
@@ -583,6 +584,7 @@ Các flow này đều có thể mở rộng, thay đổi model, thêm nguồn d�
    ```
 
 3. **Tạo embeddings và lưu vào bảng web_embeddings**:
+
    ```python
    def create_and_store_web_embeddings(self, processed_chunks):
        """Tạo và lưu embeddings cho web content"""
@@ -803,6 +805,7 @@ Các flow này đều có thể mở rộng, thay đổi model, thêm nguồn d�
    ```
 
 3. **Truy vấn trực tiếp với Qwen3 local**:
+
    ```python
    # Local inference với Qwen3 trên macOS
    def query_qwen3_local(self, system_prompt, user_query):
@@ -839,3 +842,523 @@ Các flow này đều có thể mở rộng, thay đổi model, thêm nguồn d�
    ```
 
 Như vậy, toàn bộ quy trình xử lý vector và database đã được mô tả chi tiết, từ lúc upload file, xử lý, tạo embedding, lưu trữ, đến lúc truy vấn dữ liệu và gọi model để trả lời. Đây là flow kỹ thuật đầy đủ của tính năng semantic search dựa trên vector similarity.
+
+---
+
+## 12. Backend Architecture & Technical Implementation (English Documentation)
+
+### 12.1 System Overview & Technology Stack
+
+The Study Assistant for PTITer is built with a modern, scalable architecture that combines Flask backend with React frontend. The system leverages multiple AI models, vector databases, and external APIs to provide comprehensive educational assistance.
+
+**Core Technologies:**
+- **Backend Framework**: Flask (Python) with Blueprint-based modular routing
+- **Database**: Supabase (PostgreSQL) with pgvector extension for vector operations
+- **AI/ML Stack**: LM Studio for local model serving, multiple models (Qwen, Gemma, Claude)
+- **Text Processing**: Sentence Transformers for embeddings, PyPDF2 for PDF extraction
+- **External APIs**: Brave Search for web search, PTIT APIs for academic data
+- **Authentication**: Supabase Auth with JWT tokens
+- **File Storage**: Supabase Storage for uploaded documents
+
+### 12.2 Backend Architecture & Flow Processing
+
+#### 12.2.1 Application Structure
+
+The Flask application follows a clean, modular architecture:
+
+```
+backend/
+├── app/
+│   ├── __init__.py          # Flask app factory
+│   ├── routes/              # API endpoints
+│   │   ├── auth.py          # Authentication routes
+│   │   ├── chat.py          # Chat & AI interaction
+│   │   ├── file_routes.py   # File upload/management
+│   │   └── ptit_routes.py   # PTIT academic data
+│   ├── services/            # Business logic layer
+│   │   ├── ai_service.py    # AI model interactions
+│   │   ├── file_service.py  # File processing & embeddings
+│   │   ├── web_search_service.py   # Web search integration
+│   │   ├── web_scraper_service.py  # Content scraping
+│   │   ├── schedule_service.py     # Class schedule processing
+│   │   ├── exam_schedule_service.py # Exam schedule processing
+│   │   ├── ptit_auth_service.py    # PTIT authentication
+│   │   └── query_classifier.py     # Query categorization
+│   ├── config/              # Configuration
+│   │   └── agents.py        # AI model configurations
+│   ├── lib/                 # External integrations
+│   │   └── supabase.py      # Database client
+│   └── utils/               # Utilities
+│       └── logger.py        # Logging system
+└── run.py                   # Application entry point
+```
+
+#### 12.2.2 Request Processing Flow
+
+**1. Authentication Flow:**
+- User credentials are validated through Supabase Auth
+- JWT tokens are issued and verified for subsequent requests
+- PTIT university credentials are separately validated through institutional APIs
+
+**2. Chat Message Processing:**
+```
+User Input → Query Classification → Context Retrieval → AI Processing → Response
+```
+
+**Detailed Flow:**
+1. **Request Reception**: Chat endpoint receives message with metadata (agent, file context, web search flags)
+2. **Query Classification**: `QueryClassifier` categorizes the query:
+   - `education`: General academic questions
+   - `schedule`: Class schedule queries
+   - `examschedule`: Exam schedule queries
+   - `date_query`: Date-specific queries
+   - `uml`: UML diagram requests
+   - `other`: Non-academic topics (filtered out)
+3. **Context Gathering**: Based on classification:
+   - File context: Retrieve relevant document chunks via vector similarity
+   - Web search: Scrape and embed real-time web content
+   - Academic data: Fetch schedule/exam data from PTIT APIs
+4. **AI Processing**: Selected model processes query with context
+5. **Response Delivery**: Formatted response with metadata returned to frontend
+
+### 12.3 Database Design & Data Models
+
+#### 12.3.1 Core Tables
+
+**Users & Authentication:**
+```sql
+-- Managed by Supabase Auth
+users (
+  id UUID PRIMARY KEY,
+  email TEXT,
+  encrypted_password TEXT,
+  created_at TIMESTAMP
+)
+
+-- User preferences and settings
+user_preferences (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id),
+  preferred_agent TEXT,
+  web_search_enabled BOOLEAN,
+  created_at TIMESTAMP
+)
+```
+
+**File Management & Vector Storage:**
+```sql
+-- File metadata
+user_files (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id),
+  filename TEXT,
+  content_type TEXT,
+  file_size INTEGER,
+  storage_path TEXT,
+  created_at TIMESTAMP
+)
+
+-- Text chunks for semantic search
+file_chunks (
+  id UUID PRIMARY KEY,
+  file_id UUID REFERENCES user_files(id) ON DELETE CASCADE,
+  chunk_index INTEGER,
+  content TEXT,
+  embedding VECTOR(384),  -- pgvector extension
+  created_at TIMESTAMP
+)
+
+-- Web search result storage
+web_embeddings (
+  id UUID PRIMARY KEY,
+  chat_id UUID,
+  source_url TEXT,
+  title TEXT,
+  content TEXT,
+  embedding VECTOR(384),
+  search_query TEXT,
+  created_at TIMESTAMP
+)
+```
+
+**Chat & Message Management:**
+```sql
+-- Chat sessions
+chat_sessions (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id),
+  title TEXT,
+  created_at TIMESTAMP,
+  updated_at TIMESTAMP
+)
+
+-- Individual messages
+messages (
+  id UUID PRIMARY KEY,
+  chat_id UUID REFERENCES chat_sessions(id),
+  role TEXT, -- 'user' or 'assistant'
+  content TEXT,
+  sources JSONB, -- Web search sources
+  agent_id TEXT,
+  created_at TIMESTAMP
+)
+```
+
+#### 12.3.2 Vector Search Implementation
+
+The system uses PostgreSQL's pgvector extension for efficient similarity search:
+
+```sql
+-- Create index for fast similarity search
+CREATE INDEX file_chunks_embedding_idx 
+ON file_chunks USING ivfflat (embedding vector_cosine_ops) 
+WITH (lists = 100);
+
+-- Similarity search query
+SELECT content, 1 - (embedding <=> $query_vector) as similarity
+FROM file_chunks 
+WHERE file_id = $file_id
+ORDER BY embedding <=> $query_vector
+LIMIT 5;
+```
+
+### 12.4 AI Service Architecture
+
+#### 12.4.1 Multi-Model Support
+
+The `AiService` provides a unified interface for multiple AI models:
+
+**Supported Models:**
+- **Qwen (3B/7B)**: Optimized for Vietnamese and technical content
+- **Gemma**: Google's efficient language model
+- **Claude (via API)**: For complex reasoning tasks
+- **Local Models**: Served through LM Studio
+
+**Model Configuration:**
+```python
+# config/agents.py
+AGENTS = {
+    "qwen-3b": {
+        "display_name": "Qwen 3B",
+        "model": "Qwen/Qwen-3B-Chat",
+        "temperature": 0.7,
+        "max_tokens": 2048,
+        "endpoint": "local"
+    }
+}
+```
+
+#### 12.4.2 Context Injection Strategies
+
+**1. File Context Processing:**
+- PDF text extraction using PyPDF2
+- Chunking with semantic boundaries (sentences, paragraphs)
+- Vector embedding using Sentence Transformers
+- Retrieval-Augmented Generation (RAG) implementation
+
+**2. Web Search Context:**
+- Real-time web search via Brave API
+- Content scraping with BeautifulSoup
+- Dynamic embedding and relevance scoring
+- Source attribution for transparency
+
+**3. Academic Data Context:**
+- Live integration with PTIT APIs
+- Schedule/exam data formatting
+- Date parsing and intelligent filtering
+
+### 12.5 API Endpoints & Integration
+
+#### 12.5.1 Authentication Endpoints
+
+**POST** `/auth/verify-university-credentials`
+- Validates PTIT university credentials
+- Returns current semester information
+- Required for schedule/exam features
+
+**POST** `/auth/ptit-login`
+- Raw PTIT authentication
+- Returns detailed login response data
+
+#### 12.5.2 Chat & AI Endpoints
+
+**GET** `/chat/agents`
+- Returns list of available AI models
+- Includes model capabilities and configurations
+
+**POST** `/chat`
+- Main chat interface
+- Supports multiple query types and contexts
+- Request body:
+```json
+{
+  "message": "User query",
+  "agent_id": "qwen-3b",
+  "web_search_enabled": true,
+  "file_id": "uuid-if-file-context",
+  "conversation_history": [],
+  "university_credentials": {
+    "username": "student_id",
+    "password": "encrypted_password"
+  }
+}
+```
+
+**GET** `/chat/messages`
+- Retrieves chat history for a session
+- Supports pagination and filtering
+
+#### 12.5.3 File Management Endpoints
+
+**POST** `/file/upload`
+- Handles multipart file upload
+- Processes PDF/text files
+- Creates vector embeddings
+- Returns file ID for future reference
+
+**GET** `/file/list`
+- Lists user's uploaded files
+- Returns metadata and upload timestamps
+
+**DELETE** `/file/<file_id>`
+- Removes file and associated embeddings
+- Cascading deletion for data consistency
+
+#### 12.5.4 Academic Data Endpoints
+
+**GET** `/ptit/schedule`
+- Retrieves class schedule for current semester
+- Supports date filtering and course filtering
+- Returns structured schedule data with time, location, course details
+
+**GET** `/ptit/exam-schedule`
+- Fetches exam schedule information
+- Includes exam dates, times, locations, and course codes
+- Supports filtering by date range
+
+**GET** `/ptit/student-info`
+- Returns authenticated student information
+- Includes student ID, major, current semester
+
+### 12.6 Security & Performance Considerations
+
+#### 12.6.1 Authentication & Authorization
+
+**JWT Token Management:**
+- Tokens expire after 24 hours for security
+- Refresh token mechanism for seamless user experience
+- Secure token storage in HTTP-only cookies (production)
+
+**Data Isolation:**
+- All user data is strictly isolated by user_id
+- File access controlled through user ownership verification
+- Chat sessions are private and encrypted in transit
+
+**API Rate Limiting:**
+- File upload: 10 files per hour per user
+- Chat messages: 60 requests per minute per user
+- Web search: 20 searches per hour per user
+
+#### 12.6.2 Performance Optimization
+
+**Vector Search Optimization:**
+- pgvector indexes for sub-second similarity search
+- Batch embedding creation for efficiency
+- Smart chunking strategies to balance context and speed
+
+**Caching Strategy:**
+- Academic schedule data cached for 1 hour
+- Web search results cached for 30 minutes
+- Model responses cached based on identical queries
+
+**Memory Management:**
+- Local AI models loaded on-demand
+- Automatic cleanup of temporary files
+- Connection pooling for database operations
+
+### 12.7 Monitoring & Error Handling
+
+#### 12.7.1 Logging System
+
+Comprehensive logging across all components:
+- Request/response logging for API debugging
+- Model inference timing and performance metrics
+- Error tracking with stack traces and context
+- Security event logging (failed authentication, suspicious activity)
+
+#### 12.7.2 Error Recovery
+
+**Graceful Degradation:**
+- If local AI models fail, fallback to cloud APIs
+- Web search failures don't break chat functionality
+- Academic API downtime handled with cached data
+
+**User-Friendly Error Messages:**
+- Technical errors translated to understandable language
+- Retry mechanisms for transient failures
+- Clear feedback on system limitations
+
+### 12.8 Deployment Architecture
+
+#### 12.8.1 Development Environment
+
+**Local Development Stack:**
+- Flask development server with hot reload
+- Local Supabase instance or cloud development project
+- LM Studio for local AI model serving
+- Docker containers for service isolation
+
+#### 12.8.2 Production Environment
+
+**Infrastructure:**
+- **Backend**: Containerized Flask application on cloud platform
+- **Database**: Managed Supabase PostgreSQL with pgvector
+- **File Storage**: Supabase Storage with CDN distribution
+- **AI Models**: Mix of local GPU servers and cloud APIs
+
+**Scaling Considerations:**
+- Horizontal scaling for stateless API servers
+- Load balancing for chat endpoints
+- Database read replicas for query performance
+- Vector search optimization with index tuning
+
+### 12.9 Future Enhancement Roadmap
+
+#### 12.9.1 Technical Improvements
+
+**Advanced AI Features:**
+- Multi-modal support (image, audio processing)
+- Custom fine-tuned models for PTIT-specific content
+- Federated learning for personalized responses
+
+**Performance Enhancements:**
+- Real-time embedding updates with streaming
+- Advanced caching with Redis
+- GraphQL API for flexible data fetching
+
+#### 12.9.2 Integration Expansions
+
+**Educational Platform Integration:**
+- Learning Management System (LMS) connections
+- Grade tracking and analysis
+- Assignment submission assistance
+
+**Social Features:**
+- Study group formation
+- Peer-to-peer knowledge sharing
+- Collaborative document annotation
+
+---
+
+This concludes the comprehensive backend architecture documentation. The system is designed for scalability, maintainability, and extensibility while providing robust educational assistance through advanced AI and data processing capabilities.
+- Retrieves class schedule for specific dates
+- Supports date ranges and semester filtering
+
+**GET** `/ptit/exam-schedule`
+- Fetches exam schedules
+- Supports midterm/final exam filtering
+
+### 12.6 External Service Integrations
+
+#### 12.6.1 PTIT API Integration
+
+The system integrates with PTIT's internal APIs for academic data:
+
+**Authentication Flow:**
+1. Student credentials validation
+2. Session token acquisition
+3. API access with bearer authentication
+4. Data retrieval and caching
+
+**Data Processing:**
+- Schedule parsing with Vietnamese date handling
+- Exam schedule formatting and filtering
+- Semester detection and management
+
+#### 12.6.2 Web Search Integration
+
+**Brave Search API:**
+- Real-time web search capabilities
+- Configurable result limits and filtering
+- Source metadata preservation
+
+**Content Scraping:**
+- Intelligent content extraction
+- HTML parsing and cleaning
+- Text chunking for embedding
+
+### 12.7 Performance & Scalability
+
+#### 12.7.1 Optimization Strategies
+
+**Database Optimization:**
+- Vector indexes for fast similarity search
+- Connection pooling for concurrent requests
+- Query optimization for large datasets
+
+**Caching:**
+- Academic data caching to reduce API calls
+- Embedding caching for repeated queries
+- Session management for user context
+
+**Async Processing:**
+- Asynchronous web scraping
+- Concurrent embedding generation
+- Background file processing
+
+#### 12.7.2 Error Handling & Monitoring
+
+**Comprehensive Logging:**
+- Request/response logging with timestamps
+- Error tracking with stack traces
+- Performance monitoring with execution times
+
+**Graceful Degradation:**
+- Fallback responses when external APIs fail
+- Alternative model routing when primary model unavailable
+- User-friendly error messages
+
+### 12.8 Security & Data Privacy
+
+#### 12.8.1 Authentication & Authorization
+
+**Multi-layer Security:**
+- Supabase Auth for user management
+- JWT token validation for API access
+- University credential encryption
+- Session timeout management
+
+#### 12.8.2 Data Protection
+
+**Privacy Measures:**
+- User data isolation in database
+- Secure file storage with access controls
+- No persistent storage of university passwords
+- GDPR-compliant data handling
+
+### 12.9 Development & Deployment
+
+#### 12.9.1 Local Development
+
+**Environment Setup:**
+- Python virtual environment with requirements.txt
+- Supabase local development setup
+- LM Studio for model serving
+- Environment variable configuration
+
+**Testing Strategy:**
+- Unit tests for service layers
+- Integration tests for API endpoints
+- Mock external dependencies for testing
+
+#### 12.9.2 Production Deployment
+
+**Infrastructure:**
+- Cloud deployment with container orchestration
+- Supabase hosted database and storage
+- Load balancing for high availability
+- Monitoring and alerting systems
+
+This architecture provides a robust, scalable foundation for educational AI assistance with clear separation of concerns, comprehensive error handling, and extensible design for future enhancements.
+
+---
