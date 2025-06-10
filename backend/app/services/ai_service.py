@@ -9,7 +9,7 @@ from ..utils.logger import Logger
 
 logger = Logger()
 
-LMSTUDIO_URL = "http://192.168.1.14:1234/v1/chat/completions"
+LMSTUDIO_URL = "http://192.168.1.216:1234/v1/chat/completions"
 LMSTUDIO_AUTH = "lm-studio"
 HEADERS = {
     "Authorization": f"Bearer {LMSTUDIO_AUTH}",
@@ -96,21 +96,21 @@ class AiService:
             f'File context with agent: {agent_config["display_name"]}',
             f'Model: {model}, Temperature: {temperature}'
         )
-            file_service = FileService()
-            chunks = file_service.search_relevant_chunks_in_supabase(message, file_id)
-            if chunks is None:
-                chunks = []
-            logger.log_with_timestamp('AI_SERVICE', f'Retrieved {len(chunks)} chunks for query: "{message[:30]}..."')
-            if chunks:
-                context = "\n\n---\n\n".join(chunks)
-                system_content = f"You are a helpful study assistant. User uploaded a file and asks about its content.\nHere are relevant excerpts from the file:\n{context}\nAnswer based only on the above."
-            else:
-                system_content = "You are a helpful study assistant. User asked about an uploaded file, but no relevant content was found. Please inform them you cannot find info."
-            system_message = {"role": "system", "content": system_content}
-            messages = [system_message]
-            for msg in conversation_history:
-                if msg.get('role') != 'system':
-                    messages.append(msg)
+        file_service = FileService()
+        chunks = file_service.search_relevant_chunks_in_supabase(message, file_id)
+        if chunks is None:
+            chunks = []
+        logger.log_with_timestamp('AI_SERVICE', f'Retrieved {len(chunks)} chunks for query: "{message[:30]}..."')
+        if chunks:
+            context = "\n\n---\n\n".join(chunks)
+            system_content = f"You are a helpful study assistant. User uploaded a file and asks about its content.\nHere are relevant excerpts from the file:\n{context}\nAnswer based only on the above."
+        else:
+            system_content = "You are a helpful study assistant. User asked about an uploaded file, but no relevant content was found. Please inform them you cannot find info."
+        system_message = {"role": "system", "content": system_content}
+        messages = [system_message]
+        for msg in conversation_history:
+            if msg.get('role') != 'system':
+                messages.append(msg)
         messages.append({"role": "user", "content": message})
         payload = {
             "model": model,

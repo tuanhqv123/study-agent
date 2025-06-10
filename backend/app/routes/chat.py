@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from ..services.ai_service import AiService
+from ..services.ai_service import AiService, LMSTUDIO_URL, HEADERS
 from ..services.query_classifier import QueryClassifier
 from ..services.schedule_service import ScheduleService
 from ..services.exam_schedule_service import ExamScheduleService
@@ -10,6 +10,13 @@ import time
 from datetime import datetime, timedelta
 import json
 from ..config.agents import get_agent, get_all_agents
+from collections import Counter
+import httpx
+from flask import Response
+from ..services.lmstudio_service import parse_time_lmstudio
+from ..services.file_service import FileService
+import threading
+import asyncio
 
 chat_bp = Blueprint('chat', __name__)
 ai_service = AiService()
@@ -41,13 +48,16 @@ def get_agents():
 async def chat():
     try:
         data = request.json
-        file_id = data.get('file_id')  # handle file context
+        file_ids = data.get('file_ids', [])  # Expect array of file IDs
+        file_id = data.get('file_id')  # Keep backward compatibility
         message = data.get('message')
         conversation_history = data.get('conversation_history', [])
-        agent_id = data.get('agent_id')  # Get agent_id from request
-        web_search_enabled = data.get('web_search_enabled', False)  # Get web search flag
+        chat_id = data.get('chat_id')
+        agent_id = data.get('agent_id')
+        web_search_enabled = data.get('web_search_enabled', False)
+        space_id = data.get('space_id')
         
-        # Log which agent is being used
+        # Log agent selection
         if agent_id:
             agent = get_agent(agent_id)
             logger.log_with_timestamp(
@@ -56,393 +66,302 @@ async def chat():
                 f"Model: {agent['model']}"
             )
         
-        # Handle file context
-        if file_id:
-            # use file context handler
-            response, updated_history = await ai_service.chat_with_file_context(
-                message, file_id, conversation_history, agent_id
-            )
-            return jsonify({
-                'response': response,
-                'conversation_history': updated_history,
-                'file_context_active': True,
-                'file_id': file_id,
-                'agent_id': agent_id
-            })
-        
-        if not message:
-            return jsonify({'error': 'No message provided', 'response': None}), 400
-
-        # Log user message
-        logger.log_with_timestamp("USER INPUT", message, f"Message length: {len(message)} chars")
-        
-        # Check if web search is enabled
-        if web_search_enabled:
-            logger.log_with_timestamp("WEB_SEARCH_ENABLED", "Using web search for query", "")
-            
-            # Lấy chat_id nếu có
-            chat_id = data.get('chat_id')
-            # Lấy lịch sử tin nhắn từ database nếu có chat_id
-            db_history = []
-            if chat_id:
-                try:
-                    result = supabase.table('messages') \
-                        .select('*') \
-                        .eq('chat_id', chat_id) \
-                        .order('created_at') \
-                        .execute()
-                    if result and hasattr(result, 'data'):
-                        db_history = result.data
-                        # Chuyển đổi về format phù hợp cho AI (role/content)
-                        db_history = [
-                            {"role": msg.get("role", "user"), "content": msg.get("content", "")}
-                            for msg in db_history if msg.get("content")
-                        ]
-                except Exception as e:
-                    logger.log_with_timestamp("DB_HISTORY_ERROR", f"Error fetching chat history: {e}")
-            # Gộp lịch sử db với conversation_history từ frontend (nếu có)
-            conversation_history = db_history + conversation_history
-            
-            # Log chat session info with more details
-            if chat_id:
-                logger.log_with_timestamp("CHAT_SESSION", f"Using chat session: {chat_id}")
-            else:
-                logger.log_with_timestamp("CHAT_SESSION_WARNING", "No chat_id provided, messages won't be saved to database", f"Request data keys: {list(data.keys())}")
-                # Check all the data received to debug
-                logger.log_with_timestamp("REQUEST_DATA", f"Request data: {json.dumps(data, default=str)[:500]}")
-            
-            # Call AI service with web search
-            logger.log_with_timestamp("WEB_SEARCH_CALL", "Calling AI service with web search")
-            web_response, updated_history = await ai_service.chat_with_web_search(
-                message, conversation_history, agent_id, chat_id
-            )
-            
-            # Log the response format for debugging
-            logger.log_with_timestamp("WEB_SEARCH_RESPONSE", 
-                                   f"Response type: {type(web_response)}, Keys: {list(web_response.keys()) if isinstance(web_response, dict) else 'Not a dict'}")
-                                   
-            # Log sources count and format
-            if isinstance(web_response, dict) and 'sources' in web_response:
-                sources = web_response.get('sources', [])
-                logger.log_with_timestamp("WEB_SEARCH_SOURCES", 
-                                       f"Returning {len(sources)} sources to frontend")
-                if sources and len(sources) > 0:
-                    logger.log_with_timestamp("FIRST_SOURCE_FORMAT", 
-                                           f"First source format: {json.dumps(sources[0]) if sources else 'None'}")
-            
-            # Prepare response for frontend
-            response_data = {
-                'response': web_response['content'] if isinstance(web_response, dict) else web_response,
-                'sources': web_response.get('sources', []) if isinstance(web_response, dict) else [],
-                'web_search_results': True,
-                'conversation_history': updated_history,
-                'query_type': 'web_search',
-                'agent_id': agent_id,
-                'chat_id': chat_id  # Echo back the chat_id for client reference
-            }
-            
-            logger.log_with_timestamp("WEB_SEARCH_COMPLETE", "Web search complete, returning response")
-            return jsonify(response_data)
-        
-        # Regular flow continues if web search is not enabled
-        # Use the QueryClassifier to classify the message
-        classification_result = query_classifier.classify_query(message)
-
-        # Handle UML/PlantUML diagram requests
-        if classification_result.get('category') == 'uml':
-            uml_prompt = {
-                "role": "system",
-                "content": (
-                    "You are a professional programming assistant. When returning the UML diagram,"
-                    "Always cover the Plantuml codes in the code block using the three -point sign and tag` plantuml`, "
-                    "For example:` `` Plantuml ... `` `` Frontend can display images. "
-                    "Without further explanation, only export the UML diagram."
-                )
-            }
-            # Get response from AI - REMOVE await since chat_with_ai is not async
-            response, updated_history = ai_service.chat_with_ai(
-                message,
-                [uml_prompt],
-                agent_id
-            )
-            # Ensure PlantUML content is fenced for ReactMarkdown
-            content = response.strip()
-            if not (content.startswith('```') and content.endswith('```')):
-                content = f"```plantuml\n{content}\n```"
-            # Update response and history with fenced code
-            response = content
-            updated_history[-1]["content"] = content  # Update the last message which should be assistant
-            return jsonify({
-                'response': response,
-                'conversation_history': updated_history,
-                'query_type': 'uml',
-                'agent_id': agent_id
-            })
-        
-        # Log the classification result
+        # Classify query but don't exit early - let AI handle all categories
+        classification = query_classifier.classify_query(message)
+        # Log classification result
         logger.log_with_timestamp(
             "CLASSIFICATION", 
-            classification_result['category'].upper(),
-            f"Confidence: {classification_result['confidence']:.2f} | Method: {classification_result['method']}"
+            f"Category: {classification.get('category')}",
+            f"Method: {classification.get('method')}"
         )
+        # Note: Removed early exit for 'other' category - let AI respond naturally
         
-        # Handle non-academic topics immediately
-        if classification_result['category'] == 'other':
-            non_educational_response = (
-                "Xin lỗi, tôi chỉ có thể hỗ trợ bạn với các câu hỏi liên quan đến học tập và giáo dục. "
-                "Vui lòng đặt câu hỏi khác về chủ đề học tập."
-            )
-            logger.log_with_timestamp("STANDARD RESPONSE", non_educational_response, "Non-educational query detected")
-            return jsonify({
-                'response': non_educational_response,
-                'conversation_history': conversation_history,
-                'query_type': 'other',
-                'agent_id': agent_id
-            })
+        # Prepare user query and no_thinking flag
+        flag = ""
+        clean_message = message
+        if clean_message.strip().endswith("/no_thinking"):
+            clean_message = clean_message.strip()[:-len("/no_thinking")].strip()
+            flag = "/no_thinking"
+        # Build unified user prompt: start with clean user query
+        user_content = clean_message
         
-        # Khởi tạo exam_data để tránh lỗi referenced before assignment
-        exam_data = None
-        # Handle schedule-related queries with date extraction
-        if classification_result['category'] == 'date_query' or classification_result['category'] == 'schedule':
-            # Log that we're handling a schedule/date query
-            logger.log_with_timestamp(
-                "DATE QUERY", 
-                f"Processing date query", 
-                f"Query type: {classification_result['category']}"
-            )
+        # Add space prompt if we're in a space context
+        space_prompt = ""
+        if space_id:
             try:
-                # Get university credentials from request
-                credentials = data.get('university_credentials')
-                if not credentials:
-                    raise Exception("Vui lòng cập nhật thông tin đăng nhập vào hệ thống trường học trong phần Thiết lập.")
-                # Login to PTIT system
-                success, error = ptit_auth_service.login(
-                    credentials['university_username'],
-                    credentials['university_password']
+                space_result = supabase.table('spaces').select('prompt').eq('id', space_id).single().execute()
+                if space_result and hasattr(space_result, 'data') and space_result.data:
+                    space_prompt = space_result.data.get('prompt', '')
+                    if space_prompt:
+                        user_content = f"{space_prompt}\n\nUser message: {clean_message}"
+                        logger.log_with_timestamp(
+                            "SPACE_PROMPT",
+                            f"Applied space prompt for space {space_id}",
+                            f"Prompt length: {len(space_prompt)}"
+                        )
+            except Exception as e:
+                logger.log_with_timestamp('SPACE_PROMPT_ERROR', f'Error fetching space prompt: {str(e)}')
+        
+        # File context - handle both single file (backward compatibility) and multiple files
+        all_file_chunks = []
+        processed_files = []
+        
+        # Handle backward compatibility with single file_id
+        if file_id:
+            file_ids = [file_id]
+        
+        # Get space files if we're in a space context
+        space_file_ids = []
+        if space_id:
+            try:
+                space_files = supabase.table('user_files').select('id').eq('space_id', space_id).eq('status', 'ready').execute()
+                if space_files.data:
+                    space_file_ids = [f['id'] for f in space_files.data]
+                    logger.log_with_timestamp(
+                        "SPACE_FILES", 
+                        f"Found {len(space_file_ids)} files in space {space_id}"
+                    )
+            except Exception as e:
+                logger.log_with_timestamp('SPACE_FILES_ERROR', f'Error fetching space files: {str(e)}')
+        
+        # Combine chat-specific files with space files
+        all_file_ids = []
+        if file_ids:
+            all_file_ids.extend(file_ids)
+        if space_file_ids:
+            all_file_ids.extend(space_file_ids)
+        
+        if all_file_ids:
+            file_service = FileService()
+            for current_file_id in all_file_ids:
+                chunks = file_service.search_relevant_chunks_in_supabase(message, current_file_id)
+                if chunks:
+                    all_file_chunks.extend(chunks)
+                    processed_files.append(current_file_id)
+                    
+            # Log file chunks count and sample
+            logger.log_with_timestamp(
+                "FILE_CHUNKS",
+                f"Found {len(all_file_chunks)} chunks across {len(processed_files)} files (chat: {len(file_ids or [])}, space: {len(space_file_ids)})",
+                str(all_file_chunks[:3])
+            )
+            
+            if all_file_chunks:
+                user_content += "\n\nRelevant file excerpts:\n" + "\n\n---\n\n".join(all_file_chunks)
+            else:
+                user_content += "\n\n[FILE_QUERY] Không tìm thấy đoạn văn phù hợp trong các file đã tải lên."
+        # Web search context
+        if web_search_enabled:
+            web_results = await ai_service.web_search_service.search(message, chat_id, save_to_db=True)
+            if web_results:
+                formatted = "\n".join([
+                    f"- {r['title']}: {r['url']}\n{r['snippet']}" for r in web_results
+                ])
+                user_content += "\n\nWeb search results:\n" + formatted
+        # Schedule context (only parse time for schedule/date_query)
+        if classification.get('category') in ('schedule','date_query'):
+            time_info = parse_time_lmstudio(message)
+            # Log time parsing result
+            logger.log_with_timestamp(
+                "TIME_PARSER",
+                f"Type: {time_info.get('type')}",
+                f"Value: {time_info.get('value')}"
+            )
+            creds = data.get('university_credentials')
+            if creds:
+                success, err = ptit_auth_service.login(
+                    creds['university_username'], creds['university_password']
                 )
-                if not success:
-                    raise Exception("Không thể đăng nhập vào hệ thống trường học. Vui lòng kiểm tra lại thông tin đăng nhập.")
-                # Get current semester
-                current_semester, semester_error = ptit_auth_service.get_current_semester()
-                if semester_error:
-                    raise Exception(f"Không thể lấy thông tin học kỳ: {semester_error}")
-                # Process both class schedule and exam schedule for the same date
-                schedule_result = await schedule_service.process_schedule_query(message, current_semester['hoc_ky'])
-                # Nếu là date_query, luôn luôn lấy toàn bộ lịch thi học kỳ
-                if classification_result['category'] == 'date_query':
-                    filtered_exams, exam_text, exam_date_info = await exam_schedule_service.get_exams_for_query(message, current_semester['hoc_ky'])
-                    exam_count = len(filtered_exams)
+            current_sem = None
+            try:
+                current_sem, _ = ptit_auth_service.get_current_semester()
+            except:
+                pass
+            if current_sem:
+                # Use pre-parsed time_info directly
+                sched = await schedule_service.process_schedule_query(
+                    time_info, current_sem.get('hoc_ky')
+                )
+                sched_text = sched.get('schedule_text', '') if isinstance(sched, dict) else str(sched)
+                user_content += "\n\nSchedule info:\n" + sched_text
+
+        # Exam context: date_query should fetch filtered exams, examschedule fetch full schedule
+        if classification.get('category') in ('date_query','examschedule'):
+            creds = data.get('university_credentials')
+            if creds:
+                success, err = ptit_auth_service.login(
+                    creds['university_username'], creds['university_password']
+                )
+            current_sem = None
+            try:
+                current_sem, _ = ptit_auth_service.get_current_semester()
+            except:
+                pass
+            if current_sem:
+                if classification.get('category') == 'date_query':
+                    # Filtered exams for specific date
+                    exams_list, exam_txt, _ = await exam_schedule_service.get_exams_for_query(
+                        message, current_sem.get('hoc_ky')
+                    )
+                    logger.log_with_timestamp(
+                        "EXAM_API_DATA",
+                        f"Filtered exams for date {time_info.get('value')}",
+                        exam_txt[:200]
+                    )
+                    user_content += "\n\nExam info:\n" + exam_txt
                 else:
-                    exam_result = await exam_schedule_service.process_exam_query(message, current_semester['hoc_ky'], False)
-                    if isinstance(exam_result, list):
-                        exam_text = exam_schedule_service.format_exam_schedule(exam_result)
-                        exam_count = len(exam_result)
-                    elif isinstance(exam_result, dict):
-                        exam_text = exam_result.get('exam_text')
-                        exam_count = exam_result.get('exam_count', 0)
-                    else:
-                        exam_text = None
-                        exam_count = 0
-                    exam_data = None
-                has_exams = exam_count > 0
-                # Format lịch học
-                all_schedules = schedule_result.get('all_schedules', {})
-                formatted_weekly_schedule = None
-                has_classes = False
-                if 'daily_schedules' in all_schedules:
-                    daily_schedules = all_schedules['daily_schedules']
-                    days_with_classes = [day for day in daily_schedules if day.get('classes')]
-                    has_classes = len(days_with_classes) > 0
-                    if has_classes:
-                        formatted_weekly_schedule = "\n".join([
-                            f"--- {schedule_service.get_vietnamese_weekday(datetime.strptime(day['date'], '%Y-%m-%d').weekday())}, {datetime.strptime(day['date'], '%Y-%m-%d').strftime('%d/%m/%Y')} ---\n" + schedule_service.format_schedule_for_display(day, include_header=False)
-                            for day in days_with_classes
-                        ])
-                elif 'schedule' in all_schedules:
-                    schedule = all_schedules['schedule']
-                    has_classes = bool(schedule.get('classes'))
-                    formatted_weekly_schedule = schedule_service.format_schedule_for_display(schedule, include_header=True) if has_classes else None
-                # Tạo prompt gửi cho AI
-                combined_data = ""
-                if has_classes:
-                    combined_data += "LỊCH HỌC (chỉ liệt kê các ngày có lớp):\n" + formatted_weekly_schedule + "\n"
-                # Luôn luôn add toàn bộ lịch thi nếu là date_query
-                if classification_result['category'] == 'date_query':
-                    combined_data += "Đây là LỊCH THI:\n" + (exam_text or "Không có lịch thi nào phù hợp với yêu cầu.")
-                elif has_exams:
-                    combined_data += "LỊCH THI:\n" + exam_text
-                # Nếu cả lịch học và lịch thi đều không có, trả lời lịch thi trống
-                if not has_classes and not has_exams:
-                    combined_data = "Hiện tại bạn không có lịch thi hoặc lịch học nào trong hệ thống."
-                elif not combined_data.strip():
-                    combined_data = "Không tìm thấy thông tin lớp học hoặc lịch thi cho ngày này."
-                schedule_prompt = {
-                    "role": "system",
-                    "content": f"""
-                    Bạn là trợ lý học tập cho sinh viên đại học. Dưới đây là thông tin lịch lấy từ hệ thống:{combined_data}Dựa trên lịch sử trò chuyện hãy trả lời đầy đủ, phải liệt kê chi tiết từng ngày và từng lớp học có trong dữ liệu trên. Nếu có lịch thi, hãy liệt kê rõ ràng từng môn thi, ngày thi, phòng thi. Nếu là lịch tuần, phải nhấn mạnh đây là lịch cho các ngày có lớp trong tuần từ {schedule_result['date_info']}.
-                    Trả lời bằng tiếng Việt, văn phong tự nhiên, thân thiện, nhưng tuyệt đối không được tóm tắt hay rút gọn nội dung lịch học.
-                    """
-                }
-                print("[SCHEDULE PROMPT]", f"Prompt content:\n{schedule_prompt['content']}")
-                print("[SCHEDULE DATA]", f"formatted_weekly_schedule:\n{formatted_weekly_schedule}")
-                # Tạo messages list: chỉ system prompt + user message hiện tại
-                messages = [schedule_prompt, {"role": "user", "content": message}]
-                # Gọi AI với temperature 0.8
-                try:
-                    agent_config = get_agent(agent_id)
-                    agent_config["temperature"] = 0.8
-                    enhanced_response, _ = ai_service.chat_with_ai(
-                        message, 
-                        messages,
-                        agent_id
+                    # Full exam schedule for all dates
+                    data = await exam_schedule_service.get_exam_schedule_by_semester(
+                        current_sem.get('hoc_ky'), False
                     )
-                except Exception as ai_error:
-                    logger.log_with_timestamp("SCHEDULE AI ERROR", f"Failed to get AI response: {str(ai_error)}")
-                    enhanced_response = f"Lịch của bạn:\n\n{combined_data}\n\nHãy chuẩn bị thật kỹ và đến đúng giờ nhé!"
-                conversation_history.append({
-                    "role": "system",
-                    "content": f"Schedule data: {schedule_result.get('schedule_text')}\nExam data: {exam_text}"
-                })
-                conversation_history.append({
-                    "role": "assistant",
-                    "content": enhanced_response
-                })
-                return jsonify({
-                    'response': enhanced_response,
-                    'schedule_data': schedule_result,
-                    'exam_data': exam_data,
-                    'conversation_history': conversation_history,
-                    'query_type': 'schedule',
-                    'agent_id': agent_id
-                })
-            except Exception as e:
-                error_msg = f"Error processing schedule/exam data: {str(e)}"
-                logger.log_with_timestamp("SCHEDULE ERROR", error_msg)
-                return jsonify({
-                    'error': error_msg,
-                    'schedule_data': None,
-                    'exam_data': None,
-                    'conversation_history': conversation_history,
-                    'query_type': 'schedule',
-                    'agent_id': agent_id
-                }), 500
-        
-        # Handle exam schedule queries
-        if classification_result['category'] == 'examschedule':
-            logger.log_with_timestamp(
-                "EXAM SCHEDULE QUERY", 
-                f"Processing exam schedule request", 
-                f"Current time: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+                    all_exams = data.get('data', {}).get('ds_lich_thi', [])
+                    # Format full exam list
+                    full_exam_txt = exam_schedule_service.format_exam_schedule(all_exams)
+                    # Log full exam schedule and append to user_content
+                    logger.log_with_timestamp(
+                        "EXAM_API_DATA",
+                        f"Fetched full exam schedule for semester {current_sem.get('hoc_ky')}",
+                        full_exam_txt[:200]
+                    )
+                    user_content += "\n\nFull exam schedule data:\n" + full_exam_txt
+
+        # Append no_thinking flag at the end if present
+        if flag:
+            user_content += " " + flag
+        # Log final user content before sending to LM Studio
+        logger.log_with_timestamp(
+            "FINAL_USER_CONTENT",
+            user_content[:500],
+            f"Category: {classification.get('category')}"
+        )
+
+        # Prepare system prompt with category awareness
+        category = classification.get('category', 'general')
+        if category == 'other':
+            system_content = (
+                "You are a helpful AI assistant. While you primarily focus on educational topics, "
+                "you can also provide polite, brief responses to non-educational questions when appropriate. "
+                "If the question is clearly off-topic or inappropriate, you may politely redirect to educational topics. "
+                "Answer based on context when provided, otherwise use your general knowledge appropriately."
             )
-            try:
-                credentials = data.get('university_credentials')
-                if not credentials:
-                    raise Exception("Vui lòng cập nhật thông tin đăng nhập vào hệ thống trường học trong phần Thiết lập.")
-                success, error = ptit_auth_service.login(
-                    credentials['university_username'],
-                    credentials['university_password']
-                )
-                if not success:
-                    raise Exception("Không thể đăng nhập vào hệ thống trường học. Vui lòng kiểm tra lại thông tin đăng nhập.")
-                current_semester, semester_error = ptit_auth_service.get_current_semester()
-                if semester_error:
-                    raise Exception(f"Không thể lấy thông tin học kỳ: {semester_error}")
-                # Lấy toàn bộ lịch thi học kỳ
-                exam_data = await exam_schedule_service.get_exam_schedule_by_semester(current_semester['hoc_ky'], False)
-                exam_list = exam_data['data']['ds_lich_thi'] if exam_data.get('data') and exam_data['data'].get('ds_lich_thi') else []
-                exam_text = exam_schedule_service.format_exam_schedule(exam_list)
-                exam_count = len(exam_list)
-                # Prompt: truyền toàn bộ lịch thi cho AI
-                exam_prompt = {
-                    "role": "system",
-                    "content": f"""
-                    Bạn là trợ lý học tập cho sinh viên đại học. Dưới đây là toàn bộ lịch thi học kỳ lấy từ hệ thống:
-                    {exam_text}
-                    Hãy tổng hợp và trả lời tổng quan về lịch thi cho sinh viên.đảm bảo đầy đủ môn thi, ngày thi, phòng thi, giờ thi,thời gian làm bài. Trả lời bằng tiếng Việt, văn phong tự nhiên.
-                    """
-                }
-                logger.log_with_timestamp("EXAM SCHEDULE PROMPT", exam_prompt['content'])
-                # Tạo messages list: chỉ system prompt + user message hiện tại
-                messages = [exam_prompt, {"role": "user", "content": message}]
-                try:
-                    enhanced_response, _ = ai_service.chat_with_ai(
-                        message, 
-                        messages,
-                        agent_id
-                    )
-                except Exception as ai_error:
-                    logger.log_with_timestamp("EXAM SCHEDULE AI ERROR", f"Failed to get AI response: {str(ai_error)}")
-                    enhanced_response = f"Lịch thi của bạn:\n\n{exam_text}\n\nHãy chuẩn bị thật kỹ và đến đúng giờ nhé!"
-                conversation_history.append({
-                    "role": "system",
-                    "content": exam_text
-                })
-                conversation_history.append({
-                    "role": "assistant",
-                    "content": enhanced_response
-                })
-                return jsonify({
-                    'response': enhanced_response,
-                    'exam_data': exam_data,
-                    'conversation_history': conversation_history,
-                    'query_type': 'examschedule',
-                    'agent_id': agent_id
-                })
-            except Exception as e:
-                error_msg = f"Error processing exam schedule: {str(e)}"
-                logger.log_with_timestamp("EXAM SCHEDULE ERROR", error_msg)
-                return jsonify({
-                    'error': error_msg,
-                    'exam_data': None,
-                    'conversation_history': conversation_history,
-                    'query_type': 'examschedule',
-                    'agent_id': agent_id
-                }), 500
-        
-        # If education-related (but not schedule), proceed with normal processing
-        system_message = {
-            "role": "system",
-            "content": (
+        else:
+            system_content = (
                 "You are a dedicated study assistant for university students in Vietnam. "
-                "Your role includes:\n\n"
-                "1. Supporting academic success and engagement\n"
-                "2. Providing motivation when students feel like skipping classes\n"
-                "3. Helping students understand the importance of attendance\n"
-                "4. Offering constructive advice for academic challenges\n"
-                "5. Suggesting strategies to maintain focus and motivation\n\n"
-                f"The student's query was classified as: {classification_result['category']}\n\n"
-                "Keep responses focused, constructive, and supportive. "
-                "Use examples and concrete steps when appropriate."
+                "Provide clear, helpful answers based only on the provided context and focus strictly on the user's question. "
+                "Do not add or fabricate any information not present in the context."
             )
+            
+        system_message = {
+            'role': 'system',
+            'content': system_content
         }
         
-        # Luôn chỉ truyền system + user message hiện tại cho AI
-        messages = [system_message, {"role": "user", "content": message}]
-        logger.log_with_timestamp(
-            "AI REQUEST", 
-            message, 
-            f"Query type: {classification_result['category']} | NO HISTORY (thinking mode)"
-        )
-        start_time = time.time()
-        response, updated_history = ai_service.chat_with_ai(message, messages, agent_id)
-        time_taken = round(time.time() - start_time, 2)
-        logger.log_with_timestamp(
-            "AI RESPONSE", 
-            response, 
-            f"Time: {time_taken}s"
-        )
-        return jsonify({
-            'response': response, 
-            'conversation_history': updated_history,
-            'query_type': classification_result['category'],
-            'agent_id': agent_id
-        })
+        # Build messages with conversation history
+        messages = [system_message]
+        
+        # Add conversation history (limit to last 10 messages to avoid token limit)
+        if conversation_history:
+            # Get the last 10 messages but exclude the current user message (which is already in user_content)
+            recent_history = conversation_history[-10:]
+            for hist_msg in recent_history:
+                # Only add messages with role and content
+                if hist_msg.get('role') and hist_msg.get('content'):
+                    messages.append({
+                        'role': hist_msg['role'],
+                        'content': hist_msg['content']
+                    })
+            logger.log_with_timestamp(
+                "CONVERSATION_HISTORY",
+                f"Added {len(recent_history)} messages from conversation history"
+            )
+        
+        # Add current user message with all context
+        messages.append({'role':'user','content': user_content})
+        # Handle streaming response
+        agent_cfg = get_agent(agent_id)
+        payload = {
+            'model': agent_cfg['model'],
+            'messages': messages,
+            'temperature': 0.0,
+            'stream': True
+        }
+        # Log raw payload sent to LM Studio (full content)
+        print(f"[{Logger.get_timestamp()}] LMSTUDIO_PAYLOAD: {json.dumps(payload)}")
+        
+        # Save user message to database first
+        if chat_id:
+            try:
+                # Save the original user message (before adding context/space prompt)
+                original_user_message = clean_message
+                await ai_service.web_search_service.save_message_with_sources(
+                    chat_id, 'user', original_user_message, None
+                )
+                logger.log_with_timestamp('MESSAGE_SAVE', f'Saved original user message (without space prompt)')
+            except Exception as e:
+                logger.log_with_timestamp('MESSAGE_SAVE_ERROR', f'Error saving user message: {str(e)}')
+        
+        # Store web search results for later saving
+        web_search_sources = None
+        if web_search_enabled and web_results:
+            web_search_sources = web_results
+        
+        def generate():
+            full_response = ""
+            try:
+                logger.log_with_timestamp('STREAMING', 'Starting LM Studio request...')
+                with httpx.stream('POST', LMSTUDIO_URL, headers=HEADERS, json=payload, timeout=60) as r:
+                    logger.log_with_timestamp('STREAMING', f'Response status: {r.status_code}')
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if not line: continue
+                        d = line.decode('utf-8') if isinstance(line,(bytes,bytearray)) else line
+                        if d.startswith('data: '):
+                            part = d[len('data: '):]
+                            if part.strip() == '[DONE]':
+                                logger.log_with_timestamp('STREAMING', 'Received [DONE] signal')
+                                break
+                            try:
+                                obj = json.loads(part)
+                                delta = obj['choices'][0].get('delta',{})
+                                text = delta.get('content')
+                                if text: 
+                                    full_response += text
+                                    yield text
+                            except Exception as e:
+                                logger.log_with_timestamp('STREAMING_ERROR', f'Error parsing line: {str(e)}')
+            except Exception as e:
+                logger.log_with_timestamp('STREAMING_ERROR', f'Error during streaming: {str(e)}')
+                yield f"data: Lỗi khi gọi AI: {str(e)}\n\n"
+            
+            # Save assistant message with sources after streaming is complete
+            if chat_id and full_response:
+                try:
+                    # Create a background task to save the message
+                    def save_message():
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(
+                                ai_service.web_search_service.save_message_with_sources(
+                                    chat_id, 'assistant', full_response, web_search_sources
+                                )
+                            )
+                            logger.log_with_timestamp('MESSAGE_SAVE', f'Saved assistant message with {len(web_search_sources) if web_search_sources else 0} sources')
+                        except Exception as e:
+                            logger.log_with_timestamp('MESSAGE_SAVE_ERROR', f'Error saving assistant message: {str(e)}')
+                        finally:
+                            loop.close()
+                    
+                    # Run in background thread
+                    thread = threading.Thread(target=save_message)
+                    thread.start()
+                except Exception as e:
+                    logger.log_with_timestamp('MESSAGE_SAVE_ERROR', f'Error starting save thread: {str(e)}')
+        return Response(generate(), content_type='text/event-stream')
         
     except Exception as e:
-        error_message = str(e)
-        logger.log_with_timestamp("ERROR", error_message)
-        print(f"Error in chat endpoint: {e}")
-        return jsonify({'error': error_message}), 500
+        logger.log_with_timestamp('ERROR', str(e))
+        return jsonify({'error': str(e)}), 500
 
 @chat_bp.route('/chat/messages', methods=['GET'])
 async def get_chat_messages():
@@ -493,3 +412,39 @@ async def get_chat_messages():
         error_message = str(e)
         logger.log_with_timestamp("ERROR", f"Error fetching messages: {error_message}")
         return jsonify({'error': error_message}), 500
+
+@chat_bp.route('/api/messages/metrics/daily', methods=['GET'])
+def messages_per_day():
+    """
+    Returns the number of messages per day for dashboard analytics.
+    Accepts optional 'from' and 'to' query parameters (YYYY-MM-DD).
+    """
+    try:
+        from_date = request.args.get('from')
+        to_date = request.args.get('to')
+        query = supabase.table('messages').select('created_at')
+        if from_date:
+            query = query.gte('created_at', from_date)
+        if to_date:
+            # Add 1 day to include the 'to' date fully
+            from datetime import datetime, timedelta
+            to_date_obj = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
+            query = query.lt('created_at', to_date_obj.strftime("%Y-%m-%d"))
+        res = query.execute()
+        if not hasattr(res, 'data') or not res.data:
+            return jsonify([])
+        from collections import Counter
+        date_counts = Counter()
+        for msg in res.data:
+            dt = msg.get('created_at')
+            if dt:
+                date_str = str(dt)[:10]  # 'YYYY-MM-DD'
+                date_counts[date_str] += 1
+        result = [
+            {"date": date, "total": date_counts[date]}
+            for date in sorted(date_counts.keys())
+        ]
+        return jsonify(result)
+    except Exception as e:
+        logger.log_with_timestamp('DASHBOARD_METRICS_ERROR', str(e))
+        return jsonify([]), 500

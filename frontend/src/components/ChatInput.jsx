@@ -1,8 +1,20 @@
 import { useState, useRef, useEffect } from "react";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
-import { Paperclip, Globe, Sparkle, ArrowUp } from "lucide-react";
+import { Paperclip, Globe, Sparkle, ArrowUp, X } from "lucide-react";
 import { useTheme } from "./ui/theme-provider";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "./ui/tooltip";
 
 const ChatInput = ({
   onSendMessage,
@@ -10,11 +22,14 @@ const ChatInput = ({
   onFileUpload,
   userId,
   selectedAgent,
+  activeFileContexts,
+  clearFileContext,
 }) => {
   const [message, setMessage] = useState("");
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState("");
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
-  const [thinking, setThinking] = useState(true);
+  const [thinking, setThinking] = useState(false);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
   const { theme } = useTheme();
@@ -34,12 +49,15 @@ const ChatInput = ({
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!message.trim() || isLoading) return;
-    let finalMessage = message.trim();
+    let userMessage = message.trim(); // Message hiển thị cho user
+    let backendMessage = userMessage; // Message gửi cho backend
+
     // Nếu bật web search thì không bao giờ thêm /no_thinking
     if (!webSearchEnabled && isQwenModel && !thinking) {
-      finalMessage = finalMessage + " /no_thinking";
+      backendMessage = userMessage + " /no_thinking";
     }
-    onSendMessage(finalMessage, webSearchEnabled);
+
+    onSendMessage(userMessage, webSearchEnabled, backendMessage);
     setMessage("");
   };
 
@@ -63,63 +81,220 @@ const ChatInput = ({
   };
 
   const handleFileChange = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+    const files = Array.from(e.target.files); // Support multiple files
+    if (!files.length) return;
 
-    // Validate file type (PDF only)
-    if (file.type !== "application/pdf") {
-      alert("Chỉ hỗ trợ tải lên file PDF");
-      return;
-    }
+    // Validate each file
+    for (const file of files) {
+      // Validate file type (PDF only)
+      const supportedTypes = [
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
+        "application/msword", // .doc
+      ];
 
-    // Maximum file size (10MB)
-    if (file.size > 10 * 1024 * 1024) {
-      alert("File quá lớn. Kích thước tối đa là 10MB");
-      return;
-    }
-
-    setIsUploading(true);
-
-    try {
-      // Create form data
-      const formData = new FormData();
-      formData.append("file", file);
-
-      // Sử dụng userId từ props thay vì từ localStorage
-      if (userId) {
-        formData.append("user_id", userId);
-        console.log("Uploading file with user ID:", userId);
-      } else {
-        console.error("Missing user ID for file upload");
-        alert("Không thể tải lên file: Thiếu thông tin người dùng");
-        setIsUploading(false);
+      if (!supportedTypes.includes(file.type)) {
+        alert(`File "${file.name}": Chỉ hỗ trợ file PDF, DOC, DOCX`);
         return;
       }
 
-      // Send file to backend
-      const response = await fetch("http://localhost:8000/file/upload", {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!response.ok) {
-        throw new Error("Upload failed");
+      // Maximum file size (10MB)
+      if (file.size > 10 * 1024 * 1024) {
+        alert(`File "${file.name}": File quá lớn. Kích thước tối đa là 10MB`);
+        return;
       }
+    }
 
-      const data = await response.json();
+    setIsUploading(true);
+    setUploadStatus(`Đang upload ${files.length} file(s)...`);
 
-      // Call the onFileUpload callback with file ID and name
-      if (onFileUpload && data.file_id) {
-        onFileUpload(data.file_id, file.name);
+    try {
+      // Upload files sequentially to avoid overwhelming the server
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        setUploadStatus(
+          `Đang upload file ${i + 1}/${files.length}: ${file.name}`
+        );
+        // Create form data
+        const formData = new FormData();
+        formData.append("file", file);
+
+        // Sử dụng userId từ props thay vì từ localStorage
+        if (userId) {
+          formData.append("user_id", userId);
+          console.log("Uploading file with user ID:", userId);
+        } else {
+          console.error("Missing user ID for file upload");
+          alert("Không thể tải lên file: Thiếu thông tin người dùng");
+          setIsUploading(false);
+          return;
+        }
+
+        // Send file to backend
+        const response = await fetch("http://localhost:8000/file/upload", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!response.ok) {
+          throw new Error(`Upload failed for ${file.name}`);
+        }
+
+        const data = await response.json();
+
+        // Call the onFileUpload callback with file ID and name
+        if (onFileUpload && data.file_id) {
+          onFileUpload(data.file_id, file.name);
+        }
+
+        // Don't show success message, file context will be added to UI
       }
 
       // Reset file input
       e.target.value = null;
     } catch (error) {
       console.error("File upload error:", error);
+      setUploadStatus(`❌ Lỗi upload: ${error.message}`);
       alert("Không thể tải lên file. Vui lòng thử lại sau.");
     } finally {
-      setIsUploading(false);
+      setTimeout(() => {
+        setIsUploading(false);
+        setUploadStatus("");
+      }, 2000);
+    }
+  };
+
+  const handleGoogleDriveClick = async () => {
+    try {
+      console.log("Starting Google Drive file selection...");
+
+      // Dynamic import Google Drive service
+      const { default: googleDriveService } = await import(
+        "../services/googleDriveService.js"
+      );
+
+      console.log("Google Drive service imported successfully");
+
+      setIsUploading(true);
+      setUploadStatus("Đang mở Google Drive Picker...");
+
+      // Open Google Drive Picker
+      const selectedFiles = await googleDriveService.openPicker();
+
+      if (selectedFiles && selectedFiles.length > 0) {
+        setUploadStatus(`Đang xử lý ${selectedFiles.length} file(s)...`);
+
+        for (let i = 0; i < selectedFiles.length; i++) {
+          const pickedFile = selectedFiles[i];
+          try {
+            setUploadStatus(
+              `Đang xử lý file ${i + 1}/${selectedFiles.length}: ${
+                pickedFile.name
+              }`
+            );
+
+            // Get file info
+            const fileInfo = await googleDriveService.getFileInfo(
+              pickedFile.id
+            );
+
+            // Check if it's a supported file type
+            const supportedTypes = [
+              "application/pdf",
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
+              "application/msword", // .doc
+              "application/vnd.google-apps.document", // Google Docs
+            ];
+
+            if (!supportedTypes.includes(fileInfo.mimeType)) {
+              alert(
+                `File "${fileInfo.name}": Chỉ hỗ trợ file PDF, DOC, DOCX và Google Docs`
+              );
+              continue;
+            }
+
+            // Check file size (10MB limit)
+            if (fileInfo.size && parseInt(fileInfo.size) > 10 * 1024 * 1024) {
+              alert(
+                `File "${fileInfo.name}": File quá lớn. Kích thước tối đa là 10MB`
+              );
+              continue;
+            }
+
+            setUploadStatus(
+              `Đang tải xuống ${fileInfo.name} từ Google Drive...`
+            );
+
+            // Download file from Google Drive
+            const file = await googleDriveService.downloadFile(
+              pickedFile.id,
+              fileInfo.name
+            );
+
+            console.log(`Downloaded file ${fileInfo.name}:`, {
+              size: file.size,
+              type: file.type,
+              name: file.name,
+            });
+
+            setUploadStatus(`Đang upload ${file.name} lên server...`);
+
+            // Upload to our server
+            const formData = new FormData();
+            formData.append("file", file);
+            formData.append("user_id", userId);
+
+            const response = await fetch("http://localhost:8000/file/upload", {
+              method: "POST",
+              body: formData,
+            });
+
+            if (!response.ok) {
+              const errorText = await response.text();
+              throw new Error(
+                `Upload failed for ${fileInfo.name}: ${errorText}`
+              );
+            }
+
+            const data = await response.json();
+
+            // Call the onFileUpload callback with file ID and name
+            if (onFileUpload && data.file_id) {
+              onFileUpload(data.file_id, file.name);
+            }
+
+            // Don't show success message, file context will be added to UI
+          } catch (fileError) {
+            console.error(
+              `Error processing file ${pickedFile.name}:`,
+              fileError
+            );
+            setUploadStatus(
+              `❌ Lỗi xử lý file ${pickedFile.name}: ${fileError.message}`
+            );
+            alert(
+              `Không thể xử lý file ${pickedFile.name}. Vui lòng thử lại.\nLỗi: ${fileError.message}`
+            );
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Google Drive upload error:", error);
+      setUploadStatus(`❌ Lỗi Google Drive: ${error.message}`);
+      if (error.message.includes("popup_blocked_by_browser")) {
+        alert("Trình duyệt đã chặn popup. Vui lòng cho phép popup và thử lại.");
+      } else if (error.message.includes("access_denied")) {
+        alert(
+          "Bạn cần cấp quyền truy cập Google Drive để sử dụng tính năng này."
+        );
+      } else {
+        alert("Không thể kết nối với Google Drive. Vui lòng thử lại sau.");
+      }
+    } finally {
+      setTimeout(() => {
+        setIsUploading(false);
+        setUploadStatus("");
+      }, 2000); // Keep status visible for 2 seconds
     }
   };
 
@@ -143,6 +318,47 @@ const ChatInput = ({
           className={`relative flex flex-col w-full rounded-2xl bg-gray-100 dark:bg-[#232323] p-3`}
           style={{ border: "none", boxShadow: "none" }}
         >
+          {/* Display active file contexts if present */}
+          {activeFileContexts && activeFileContexts.length > 0 && (
+            <div className="mb-2">
+              <div className="flex flex-wrap gap-2">
+                {activeFileContexts.map((fileContext) => (
+                  <div
+                    key={fileContext.id}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm w-fit ${
+                      isLight
+                        ? "bg-blue-50 text-blue-700"
+                        : "bg-[#2a2a2a] text-[#d1cfc0]/70"
+                    }`}
+                  >
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="truncate max-w-[150px]">
+                            {fileContext.name}
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>{fileContext.name}</TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        clearFileContext(fileContext.id);
+                      }}
+                      className="text-muted-foreground hover:text-foreground p-0.5 rounded-full hover:bg-gray-200 dark:hover:bg-[#333333] transition-colors"
+                      aria-label="Xóa file"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Textarea nhập tin nhắn */}
           <Textarea
             ref={textareaRef}
@@ -167,22 +383,36 @@ const ChatInput = ({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".pdf"
+                accept=".pdf,.doc,.docx"
+                multiple // Enable multiple file selection
                 onChange={handleFileChange}
                 className="hidden"
                 disabled={isLoading || isUploading}
               />
-              <Button
-                type="button"
-                onClick={handleFileButtonClick}
-                size="icon"
-                className={iconBtnStyle}
-                disabled={isLoading || isUploading}
-                title="Đính kèm file PDF"
-              >
-                <Paperclip className="h-5 w-5" strokeWidth={2.5} />
-                <span className="sr-only">Đính kèm file</span>
-              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger>
+                  <Button
+                    type="button"
+                    size="icon"
+                    className={`${iconBtnStyle} ${
+                      isUploading ? activeBtnStyle : ""
+                    }`}
+                    disabled={isLoading || isUploading}
+                    title="Đính kèm file PDF"
+                  >
+                    <Paperclip className="h-5 w-5" strokeWidth={2.5} />
+                    <span className="sr-only">Đính kèm file</span>
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent>
+                  <DropdownMenuItem onClick={handleFileButtonClick}>
+                    Upload từ máy tính
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={handleGoogleDriveClick}>
+                    Chọn từ Google Drive
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
 
               {/* Nút Thinking (nếu là Qwen) */}
               {isQwenModel && (
@@ -239,20 +469,26 @@ const ChatInput = ({
           </div>
 
           {/* Upload status indicator */}
-          {isUploading && (
+          {(isUploading || uploadStatus) && (
             <div
-              className={`absolute -top-10 left-0 right-0 flex items-center justify-center p-2 rounded-md text-sm ${
-                isLight
+              className={`mb-2 flex items-center justify-center p-2 rounded-md text-sm ${
+                uploadStatus.includes("❌")
+                  ? isLight
+                    ? "bg-red-50 text-red-700"
+                    : "bg-red-900/20 text-red-400"
+                  : isLight
                   ? "bg-blue-50 text-blue-700"
                   : "bg-[#2a2a2a] text-[#d1cfc0]/70"
               }`}
             >
-              <div
-                className={`h-2 w-2 animate-pulse rounded-full mr-2 ${
-                  isLight ? "bg-blue-600" : "bg-blue-400"
-                }`}
-              ></div>
-              Đang tải lên file...
+              {!uploadStatus.includes("❌") && (
+                <div
+                  className={`h-2 w-2 animate-pulse rounded-full mr-2 ${
+                    isLight ? "bg-blue-600" : "bg-blue-400"
+                  }`}
+                ></div>
+              )}
+              {uploadStatus || "Đang tải lên file..."}
             </div>
           )}
         </form>

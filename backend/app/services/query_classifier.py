@@ -12,7 +12,6 @@ class QueryClassifier:
         if not text or text.strip() == '':
             return {
                 'category': 'general',
-                'confidence': 0.5,
                 'method': 'empty-input'
             }
         # Gọi LM Studio Classifier API
@@ -21,13 +20,11 @@ class QueryClassifier:
         if 'type' in result:
             return {
                 'category': result['type'],
-                'confidence': 1.0,
                 'method': 'lmstudio'
             }
         else:
             return {
                 'category': 'general',
-                'confidence': 0.3,
                 'method': 'lmstudio-error',
                 'error': result.get('error', 'Unknown error')
             }

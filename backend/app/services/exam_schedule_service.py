@@ -45,10 +45,10 @@ class ExamScheduleService:
         Returns:
             dict: Exam schedule data
         """
-        logger.log_with_timestamp("EXAM SCHEDULE API", f"Getting exam schedule for semester: {hoc_ky}, midterm: {is_giua_ky}")
-        
+        # Minimal logging for exam schedule
+
         if not self.check_auth():
-            logger.log_with_timestamp("EXAM SCHEDULE API", "No auth token found, getting current semester...")
+            logger.log_with_timestamp("EXAM SCHEDULE API", "No auth token found, retrieving current semester...")
             current_semester, error = self.auth_service.get_current_semester()
             if error:
                 logger.log_with_timestamp("EXAM SCHEDULE ERROR", f"Authentication error: {error}")
@@ -80,21 +80,12 @@ class ExamScheduleService:
 
         try:
             async with httpx.AsyncClient() as client:
-                logger.log_with_timestamp("EXAM SCHEDULE API", f"Sending request to {url} with semester {hoc_ky}")
                 response = await client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
                 data = response.json()
-                
-                logger.log_with_timestamp("EXAM SCHEDULE API", f"Received response: Status {response.status_code}")
-                
                 if data.get('data'):
                     exams = data['data'].get('ds_lich_thi', [])
-                    logger.log_with_timestamp("EXAM SCHEDULE API", f"Total exams: {len(exams)}")
-                    
-                    for exam in exams:
-                        logger.log_with_timestamp("EXAM SCHEDULE API", 
-                            f"Exam: {exam.get('ten_mon')} | Date: {exam.get('ngay_thi')} | Room: {exam.get('ma_phong')}")
-                
+                    logger.log_with_timestamp("EXAM SCHEDULE API", f"Fetched {len(exams)} exams for semester {hoc_ky}")
                 return data
         except Exception as e:
             logger.log_with_timestamp("EXAM SCHEDULE ERROR", f"Error getting exam schedule: {str(e)}")

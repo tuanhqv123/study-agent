@@ -35,7 +35,7 @@ class FileService:
             # Fallback to zeros in case of error
             return [0.0] * self.embedding_dimension
 
-    def save_file_and_chunks_to_supabase(self, user_id, file, file_content):
+    def save_file_and_chunks_to_supabase(self, user_id, file, file_content, space_id=None):
         """
         Save file metadata and its text chunks with embeddings into Supabase.
         Returns the generated file_id.
@@ -53,6 +53,10 @@ class FileService:
             'file_size_bytes': file_size,
             'status': 'processing'
         }
+        
+        # Add space_id if provided
+        if space_id:
+            meta['space_id'] = space_id
         
         # Sử dụng phương thức đồng bộ thay vì await
         supabase.table('user_files').insert(meta).execute()
@@ -96,10 +100,10 @@ class FileService:
             # Set cosine similarity threshold for semantic matching
             match_threshold = 0.5  # Higher value for better quality matches
             
-            # call RPC for vector search - Cập nhật tham số file_id thành p_file_id để phù hợp với SQL function
+            # call RPC for vector search - Sử dụng tên parameter đúng từ database function
             response = supabase.rpc('match_file_chunks', {
                 'query_embedding': emb,
-                'p_file_id': file_id,  # Đã đổi từ match_file_id thành p_file_id
+                'match_file_id': file_id,  # Sử dụng tên parameter đúng từ RPC function
                 'match_threshold': match_threshold,
                 'match_count': top_k
             }).execute()

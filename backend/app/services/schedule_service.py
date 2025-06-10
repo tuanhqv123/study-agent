@@ -350,25 +350,16 @@ class ScheduleService:
         
         return result
         
-    async def process_schedule_query(self, question, hoc_ky):
+    async def process_schedule_query(self, time_info, hoc_ky):
         """
-        Xử lý truy vấn lịch học, tách ngày bằng AI (parse_time_lmstudio), không dùng extract_date_references nữa.
+        Process schedule query based on pre-parsed time_info.
         """
-        from .lmstudio_service import parse_time_lmstudio
         import calendar
         today = datetime.now().date()
-        # Gọi AI để phân tích thời gian
-        time_info = parse_time_lmstudio(question)
+        # Use provided time_info without re-parsing
         type_ = time_info.get('type')
         value = time_info.get('value')
-        print("[DEBUG] time_info:", time_info)
-        print("[DEBUG] type_:", type_)
-        print("[DEBUG] value:", value)
-        # Nếu value chỉ là số (ví dụ '28'), tự động ghép tháng/năm hiện tại
-        if type_ == 'day' and isinstance(value, str) and value.isdigit():
-            today = datetime.now().date()
-            value = f"{value}/{today.month:02d}/{today.year}"
-            print("[DEBUG] value auto-filled with current month/year:", value)
+
         def get_week_dates(ref):
             if ref == 'current_week':
                 start = today - timedelta(days=today.weekday())
@@ -400,7 +391,7 @@ class ScheduleService:
         schedule_dates = []
         date_range_info = ''
         date_type = type_
-        original_text = question
+        original_text = str(value)
         if type_ == 'far_time':
             # Không hỗ trợ lấy lịch học cho các truy vấn quá xa
             formatted_message = "Xin lỗi, tôi chỉ hỗ trợ truy vấn lịch học trong tuần hoặc ngày cụ thể."
@@ -409,7 +400,7 @@ class ScheduleService:
                 'schedule_text': formatted_message,
                 'date_info': '',
                 'date_type': type_,
-                'original_text': question,
+                'original_text': original_text,
                 'all_schedules': all_schedules
             }
         elif type_ == 'day':
@@ -506,21 +497,17 @@ class ScheduleService:
                 else:
                     schedule_dates = week_dates
         # Sau khi tính xong schedule_dates
-        print("[DEBUG] schedule_dates:", schedule_dates)
         if not schedule_dates:
-            print("[DEBUG] schedule_dates is empty, fallback to current week")
             schedule_dates = get_week_dates('current_week')
         # Lấy lịch học cho các ngày đã xác định
-            all_daily_schedules = []
-            has_any_classes = False
+        all_daily_schedules = []
+        has_any_classes = False
         for d in schedule_dates:
             daily_schedule = await self.get_schedule(d, hoc_ky)
-            print(f"[DEBUG] daily_schedule for {d}: {daily_schedule}")
-                if daily_schedule:
-                    all_daily_schedules.append(daily_schedule)
-                if daily_schedule.get("classes"):
-                        has_any_classes = True
-        print("[DEBUG] all_daily_schedules:", all_daily_schedules)
+            if daily_schedule:
+                all_daily_schedules.append(daily_schedule)
+            if daily_schedule.get("classes"):
+                has_any_classes = True
         # Format kết quả
         if len(schedule_dates) > 1:
             formatted_message = f"Đây là lịch học cho truy vấn của bạn ({type_}):\n\n"
@@ -553,15 +540,13 @@ class ScheduleService:
                 'schedule': schedule_data
             }
         else:
-            print("[DEBUG] Không tìm thấy ngày phù hợp trong truy vấn hoặc không lấy được daily_schedules")
             formatted_message = "Không tìm thấy ngày phù hợp trong truy vấn của bạn."
             date_range_info = ''
             all_schedules = {}
-        print("[DEBUG] RETURN all_schedules:", all_schedules)
         return {
             'schedule_text': formatted_message,
             'date_info': date_range_info,
             'date_type': type_,
-            'original_text': question,
+            'original_text': original_text,
             'all_schedules': all_schedules
         }

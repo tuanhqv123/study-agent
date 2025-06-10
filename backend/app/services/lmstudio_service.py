@@ -1,7 +1,7 @@
 import httpx
 import json
 
-LMSTUDIO_URL = "http://192.168.1.14:1234/v1/chat/completions"
+LMSTUDIO_URL = "http://192.168.1.216:1234/v1/chat/completions"
 LMSTUDIO_AUTH = "lm-studio"
 
 # Prompt và config cho từng model

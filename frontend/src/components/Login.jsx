@@ -7,6 +7,7 @@ import {
   verifyOTP,
 } from "../lib/supabase";
 import { useTheme } from "./ui/theme-provider";
+import { supabase } from "../lib/supabase";
 
 const Login = () => {
   const navigate = useNavigate();
@@ -19,14 +20,32 @@ const Login = () => {
   const { theme } = useTheme();
   const isLight = theme === "light";
 
+  // Helper: after login, check role and navigate
+  const handleRoleAndNavigate = async () => {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (user) {
+      const { data } = await supabase
+        .from("public_users")
+        .select("user_role")
+        .eq("id", user.id)
+        .single();
+      if (data?.user_role && data.user_role.trim().toLowerCase() === "admin") {
+        navigate("/admin");
+      } else {
+        navigate("/chat");
+      }
+    }
+  };
+
   const handleLoginWithGoogle = async () => {
     setIsLoading(true);
     setError(null);
-
     try {
       const { error } = await signInWithGoogle();
       if (error) throw error;
-      navigate("/chat");
+      await handleRoleAndNavigate();
     } catch (error) {
       setError(error.message);
     } finally {
@@ -38,14 +57,13 @@ const Login = () => {
     e.preventDefault();
     setIsLoading(true);
     setError(null);
-
     try {
       // Bước 1: Đăng nhập bằng email/mật khẩu hoặc gửi OTP
       if (step === 1) {
         if (password) {
           const { error } = await signInWithEmail(email, password);
           if (error) throw error;
-          navigate("/chat");
+          await handleRoleAndNavigate();
         } else {
           const { error } = await sendOTP(email);
           if (error) throw error;
@@ -56,7 +74,7 @@ const Login = () => {
       else {
         const { error } = await verifyOTP(email, otp);
         if (error) throw error;
-        navigate("/chat");
+        await handleRoleAndNavigate();
       }
     } catch (error) {
       setError(error.message);

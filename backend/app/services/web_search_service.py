@@ -9,14 +9,16 @@ logger = Logger()
 
 class WebSearchService:
     def __init__(self):
-        # API key for Brave Search
-        self.BRAVE_API_KEY = "BSAZNoNkz9pcKr2p29Vgu42om-CCbLb"
-        # Brave Search API URL
-        self.BRAVE_API_URL = "https://api.search.brave.com/res/v1/web/search"
+        # Google Custom Search API credentials
+        # Cần tạo tại: https://developers.google.com/custom-search/v1/introduction
+        self.GOOGLE_API_KEY = "AIzaSyBcWP-MavLpMc1SF-IryANHxkB1uuiAcb8"
+        self.GOOGLE_SEARCH_ENGINE_ID = "315c7d160a9b0494c"  # cx parameter
+        # Google Custom Search API URL
+        self.GOOGLE_API_URL = "https://www.googleapis.com/customsearch/v1"
 
     async def search(self, query, chat_id=None, save_to_db=False):
         """
-        Perform a web search using Brave Search API directly.
+        Perform a web search using Google Custom Search API.
         
         Args:
             query (str): The search query
@@ -29,26 +31,29 @@ class WebSearchService:
         try:
             logger.log_with_timestamp('WEB_SEARCH', f'Searching web for: "{query}"')
             
-            # Call the Brave Search API directly
-            brave_params = {"q": query, "count": 10, "search_lang": "vi"}
-            brave_headers = {
-                "Accept": "application/json",
-                "X-Subscription-Token": self.BRAVE_API_KEY
+            # Call the Google Custom Search API
+            google_params = {
+                "key": self.GOOGLE_API_KEY,
+                "cx": self.GOOGLE_SEARCH_ENGINE_ID,
+                "q": query,
+                "num": 10,  # Number of results (max 10)
+                "lr": "lang_vi",  # Language restriction to Vietnamese
+                "safe": "medium"  # Safe search level
             }
-            print('[BRAVE_SEARCH_PAYLOAD] params:', brave_params)
-            print('[BRAVE_SEARCH_PAYLOAD] headers:', brave_headers)
+            
+            print('[GOOGLE_SEARCH_PAYLOAD] params:', google_params)
+            
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(
-                    self.BRAVE_API_URL,
-                    params=brave_params,
-                    headers=brave_headers
+                    self.GOOGLE_API_URL,
+                    params=google_params
                 )
                 
                 # Check if response is successful
                 if response.status_code != 200:
                     logger.log_with_timestamp(
                         'WEB_SEARCH_ERROR', 
-                        f'Error from Brave Search API: Status {response.status_code}'
+                        f'Error from Google Search API: Status {response.status_code}'
                     )
                     return []
                 
@@ -60,17 +65,18 @@ class WebSearchService:
                     raw_json = json.dumps(result, indent=2)[:1000]
                     logger.log_with_timestamp('WEB_SEARCH_RAW', f'Raw API structure: {raw_json}')
                     print('[WEB_SEARCH_RAW]', raw_json)
-                    if 'web' not in result:
-                        logger.log_with_timestamp('WEB_SEARCH_RAW', 'No "web" key in Brave API response!')
-                        print('[WEB_SEARCH_RAW] No "web" key in Brave API response!')
+                    
+                    if 'items' not in result:
+                        logger.log_with_timestamp('WEB_SEARCH_RAW', 'No "items" key in Google API response!')
+                        print('[WEB_SEARCH_RAW] No "items" key in Google API response!')
+                        # Check for errors
+                        if 'error' in result:
+                            error_msg = result['error'].get('message', 'Unknown error')
+                            logger.log_with_timestamp('WEB_SEARCH_ERROR', f'Google API Error: {error_msg}')
                     else:
-                        web_results = result['web'].get('results', None)
-                        if web_results is None:
-                            logger.log_with_timestamp('WEB_SEARCH_RAW', 'No "results" key in "web" object!')
-                            print('[WEB_SEARCH_RAW] No "results" key in "web" object!')
-                        else:
-                            logger.log_with_timestamp('WEB_SEARCH_RAW', f'Number of web results: {len(web_results)}')
-                            print(f'[WEB_SEARCH_RAW] Number of web results: {len(web_results)}')
+                        items = result.get('items', [])
+                        logger.log_with_timestamp('WEB_SEARCH_RAW', f'Number of search results: {len(items)}')
+                        print(f'[WEB_SEARCH_RAW] Number of search results: {len(items)}')
                 except Exception as e:
                     logger.log_with_timestamp('WEB_SEARCH_RAW', f'Error logging raw structure: {str(e)}')
                     print('[WEB_SEARCH_RAW] Error logging raw structure:', str(e))
@@ -97,10 +103,10 @@ class WebSearchService:
     
     def _format_search_results(self, raw_results):
         """
-        Format and extract relevant information from raw search results.
+        Format and extract relevant information from raw Google search results.
         
         Args:
-            raw_results (dict): Raw search results from Brave Search
+            raw_results (dict): Raw search results from Google Custom Search
             
         Returns:
             list: Formatted search results with snippets and URLs
@@ -108,16 +114,16 @@ class WebSearchService:
         formatted_results = []
         
         try:
-            # Extract results from the Brave Search API response
+            # Extract results from the Google Custom Search API response
             if isinstance(raw_results, dict):
-                web_results = raw_results.get('web', {}).get('results', [])
+                items = raw_results.get('items', [])
                 
-                for item in web_results:
+                for item in items:
                     # Đảm bảo kết quả luôn có các trường cần thiết và không null
                     result = {
                         'title': item.get('title', 'Untitled'),
-                        'url': item.get('url', '#'),
-                        'snippet': item.get('description', '')
+                        'url': item.get('link', '#'),  # Google uses 'link' instead of 'url'
+                        'snippet': item.get('snippet', '')
                     }
                     formatted_results.append(result)
             
