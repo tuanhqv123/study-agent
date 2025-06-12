@@ -4,8 +4,17 @@ import httpx
 import uuid
 from ..utils.logger import Logger
 from ..lib.supabase import supabase
+from .web_scraper_service import WebScraperService
 
 logger = Logger()
+
+# LM Studio configuration for query optimization
+LMSTUDIO_URL = "http://192.168.1.216:1234/v1/chat/completions"
+LMSTUDIO_AUTH = "lm-studio"
+LMSTUDIO_HEADERS = {
+    "Authorization": f"Bearer {LMSTUDIO_AUTH}",
+    "Content-Type": "application/json"
+}
 
 class WebSearchService:
     def __init__(self):
@@ -15,6 +24,141 @@ class WebSearchService:
         self.GOOGLE_SEARCH_ENGINE_ID = "315c7d160a9b0494c"  # cx parameter
         # Google Custom Search API URL
         self.GOOGLE_API_URL = "https://www.googleapis.com/customsearch/v1"
+        # Đảm bảo kết quả trả về không bị escape Unicode
+        self.GOOGLE_PARAMS = {
+            "key": "AIzaSyBcWP-MavLpMc1SF-IryANHxkB1uuiAcb8",
+            "cx": "315c7d160a9b0494c",
+            "num": 10,  # Number of results (max 10)
+            "lr": "lang_vi",  # Language restriction to Vietnamese
+            "safe": "medium",  # Safe search level
+            "prettyPrint": True  # Để dễ đọc kết quả
+        }
+        # Khởi tạo web scraper
+        self.web_scraper = WebScraperService()
+
+    async def optimize_query_with_llm(self, user_query, agent_model):
+        """
+        Use LLM to optimize search query before performing web search.
+        
+        Args:
+            user_query (str): Original user query
+            agent_model (str): Model name being used by the user
+            
+        Returns:
+            str: Optimized search query
+        """
+        try:
+            logger.log_with_timestamp('QUERY_OPTIMIZATION', f'Optimizing query: "{user_query}" using model: {agent_model}')
+            
+            # System prompt for query optimization (KHÔNG ưu tiên tiếng Anh)
+            system_prompt = (
+                "Bạn là chuyên gia tối ưu hóa truy vấn tìm kiếm web. Hãy chuyển đổi câu hỏi của người dùng thành một truy vấn tìm kiếm hiệu quả nhất, ngắn gọn, giữ lại các từ khóa quan trọng.\n"
+                "Chỉ trả về một object JSON duy nhất với trường 'query' chứa truy vấn tối ưu, không giải thích, không thêm bất kỳ văn bản nào khác.\n"
+                "Ví dụ:\n"
+                "User: 'Tôi muốn biết về tình hình kinh tế Việt Nam hiện tại'\n"
+                "Output: {\"query\": \"tình hình kinh tế Việt Nam 2024\"}\n"
+                "User: 'Cách học lập trình Python hiệu quả'\n"
+                "Output: {\"query\": \"phương pháp học lập trình Python hiệu quả cho người mới\"}"
+            )
+            
+            # JSON schema giống như trong lmstudio_service.py
+            payload = {
+                'model': agent_model,
+                'messages': [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_query + ' /no_thinking'}
+                ],
+                'response_format': {
+                    'type': 'json_schema',
+                    'json_schema': {
+                        'schema': {
+                            'type': 'object',
+                            'properties': {
+                                'query': {
+                                    'type': 'string'
+                                }
+                            },
+                            'required': ['query'],
+                            'additionalProperties': False
+                        }
+                    }
+                },
+                'temperature': 0.2,
+                'max_tokens': 50,
+                'stream': False
+            }
+            
+            # Log the optimization request
+            logger.log_with_timestamp('QUERY_OPTIMIZATION_REQUEST', f'Sending to LM Studio: {json.dumps(payload, ensure_ascii=False)}')
+            
+            # Make request to LM Studio
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    LMSTUDIO_URL,
+                    headers=LMSTUDIO_HEADERS,
+                    json=payload
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result['choices'][0]['message']['content']
+                    try:
+                        query_obj = json.loads(content)
+                        optimized_query = query_obj['query'].strip()
+                        logger.log_with_timestamp('QUERY_OPTIMIZATION_SUCCESS', f'Original: "{user_query}" -> Optimized: "{optimized_query}"')
+                        return optimized_query
+                    except Exception as e:
+                        logger.log_with_timestamp('QUERY_OPTIMIZATION_PARSE_ERROR', f'Error parsing JSON: {str(e)} | Content: {content}')
+                        return user_query
+                else:
+                    logger.log_with_timestamp('QUERY_OPTIMIZATION_ERROR', f'LM Studio error: {response.status_code}')
+                    return user_query
+                    
+        except Exception as e:
+            logger.log_with_timestamp('QUERY_OPTIMIZATION_ERROR', f'Error optimizing query: {str(e)}')
+            return user_query
+
+    async def search_with_optimization(self, user_query, agent_model, chat_id=None, save_to_db=False, with_scraping=True):
+        """
+        Perform web search with LLM query optimization and optional content scraping.
+        
+        Args:
+            user_query (str): Original user query
+            agent_model (str): Model name being used by the user
+            chat_id (uuid, optional): The chat session ID to save search results to
+            save_to_db (bool, optional): Whether to save search results to database
+            with_scraping (bool, optional): Whether to scrape content from search results
+            
+        Returns:
+            dict: Contains optimized_query and search results
+        """
+        try:
+            # Step 1: Optimize query using LLM
+            optimized_query = await self.optimize_query_with_llm(user_query, agent_model)
+            
+            # Step 2: Perform search with optimized query and optional scraping
+            if with_scraping:
+                logger.log_with_timestamp('SEARCH_WITH_OPTIMIZATION', f'Using scraping for query: "{optimized_query}"')
+                search_results = await self.search_with_scraping(optimized_query, chat_id, save_to_db)
+            else:
+                search_results = await self.search(optimized_query, chat_id, save_to_db)
+            
+            # Return both optimized query and results for transparency
+            return {
+                'original_query': user_query,
+                'optimized_query': optimized_query,
+                'results': search_results
+            }
+            
+        except Exception as e:
+            logger.log_with_timestamp('SEARCH_WITH_OPTIMIZATION_ERROR', f'Error in optimized search: {str(e)}')
+            # Fallback to regular search with original query
+            search_results = await self.search(user_query, chat_id, save_to_db)
+            return {
+                'original_query': user_query,
+                'optimized_query': user_query,  # Same as original if optimization failed
+                'results': search_results
+            }
 
     async def search(self, query, chat_id=None, save_to_db=False):
         """
@@ -31,15 +175,9 @@ class WebSearchService:
         try:
             logger.log_with_timestamp('WEB_SEARCH', f'Searching web for: "{query}"')
             
-            # Call the Google Custom Search API
-            google_params = {
-                "key": self.GOOGLE_API_KEY,
-                "cx": self.GOOGLE_SEARCH_ENGINE_ID,
-                "q": query,
-                "num": 10,  # Number of results (max 10)
-                "lr": "lang_vi",  # Language restriction to Vietnamese
-                "safe": "medium"  # Safe search level
-            }
+            # Call the Google Custom Search API - sử dụng self.GOOGLE_PARAMS
+            google_params = self.GOOGLE_PARAMS.copy()
+            google_params["q"] = query
             
             print('[GOOGLE_SEARCH_PAYLOAD] params:', google_params)
             
@@ -62,7 +200,7 @@ class WebSearchService:
                 
                 # Log the raw response structure for debugging
                 try:
-                    raw_json = json.dumps(result, indent=2)[:1000]
+                    raw_json = json.dumps(result, ensure_ascii=False, indent=2)[:1000]
                     logger.log_with_timestamp('WEB_SEARCH_RAW', f'Raw API structure: {raw_json}')
                     print('[WEB_SEARCH_RAW]', raw_json)
                     
@@ -119,20 +257,28 @@ class WebSearchService:
                 items = raw_results.get('items', [])
                 
                 for item in items:
+                    # Decode Unicode escape sequences in title and snippet
+                    title = item.get('title', 'Untitled')
+                    snippet = item.get('snippet', '')
+                    url = item.get('link', '#')
+                    
+                    # Log title trước khi decode để debug
+                    logger.log_with_timestamp('SEARCH_TITLE_RAW', f'Raw title: {title}')
+                    
                     # Đảm bảo kết quả luôn có các trường cần thiết và không null
                     result = {
-                        'title': item.get('title', 'Untitled'),
-                        'url': item.get('link', '#'),  # Google uses 'link' instead of 'url'
-                        'snippet': item.get('snippet', '')
+                        'title': title,
+                        'url': url,
+                        'snippet': snippet
                     }
                     formatted_results.append(result)
             
             # Log kết quả đầu tiên để kiểm tra định dạng
             if formatted_results:
-                logger.log_with_timestamp('SEARCH_FORMAT', f'First result format: {json.dumps(formatted_results[0])}')
+                logger.log_with_timestamp('SEARCH_FORMAT', f'First result format: {json.dumps(formatted_results[0], ensure_ascii=False)}')
             
-            # Limit to top 5 results to avoid overwhelming context
-            return formatted_results[:5]
+            # Trả về tối đa 10 kết quả thay vì 5
+            return formatted_results[:10]
             
         except Exception as e:
             logger.log_with_timestamp('WEB_SEARCH_ERROR', f'Error formatting results: {str(e)}')
@@ -237,4 +383,53 @@ class WebSearchService:
             return True
         except Exception as e:
             logger.log_with_timestamp('SEARCH_SAVE_ERROR', f'Error saving search results: {str(e)}')
-            return False 
+            return False
+
+    async def search_with_scraping(self, query, chat_id=None, save_to_db=False):
+        """
+        Perform web search and scrape content from the top results.
+        
+        Args:
+            query (str): The search query
+            chat_id (uuid, optional): The chat session ID to save search results to
+            save_to_db (bool, optional): Whether to save search results to database
+            
+        Returns:
+            list: Search results with snippets, URLs, and scraped content
+        """
+        try:
+            logger.log_with_timestamp('WEB_SEARCH_SCRAPING', f'Searching and scraping for: "{query}"')
+            
+            # Step 1: Get search results from Google
+            search_results = await self.search(query, chat_id, save_to_db)
+            
+            if not search_results:
+                logger.log_with_timestamp('WEB_SEARCH_SCRAPING', 'No search results found')
+                return []
+                
+            # Step 2: Extract URLs from top 5 results
+            urls_to_scrape = [result['url'] for result in search_results[:5]]
+            
+            # Step 3: Scrape content from these URLs
+            logger.log_with_timestamp('WEB_SEARCH_SCRAPING', f'Scraping {len(urls_to_scrape)} URLs')
+            scraped_contents = await self.web_scraper.scrape_urls(urls_to_scrape)
+            
+            # Step 4: Merge scraped content with search results
+            for i, result in enumerate(search_results):
+                # Find matching scraped content for this URL
+                for scraped in scraped_contents:
+                    if scraped['url'] == result['url']:
+                        # Add scraped content to search result
+                        result['scraped_content'] = scraped['content']
+                        break
+                else:
+                    # No scraped content found for this URL
+                    result['scraped_content'] = ""
+            
+            logger.log_with_timestamp('WEB_SEARCH_SCRAPING', f'Completed scraping for {len(scraped_contents)} URLs')
+            return search_results
+            
+        except Exception as e:
+            logger.log_with_timestamp('WEB_SEARCH_SCRAPING_ERROR', f'Error in search with scraping: {str(e)}')
+            # Fallback to regular search without scraping
+            return await self.search(query, chat_id, save_to_db) 

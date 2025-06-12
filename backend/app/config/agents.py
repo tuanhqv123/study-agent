@@ -16,14 +16,14 @@ AVAILABLE_AGENTS = {
         "model": "qwen3-4b",
         "display_name": "qwen3-4b",
         "temperature": 0.7,
-        "is_default": False
+        "is_default": True
     },
     "qwen3-8b": {
         "id": "qwen3-8b",
         "model": "qwen3-8b",
         "display_name": "qwen3-8b",
         "temperature": 0.7,
-        "is_default": True
+        "is_default": False
     },
     "gemma-3-1b-it": {
         "id": "gemma-3-1b-it",

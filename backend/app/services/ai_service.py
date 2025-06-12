@@ -144,16 +144,39 @@ class AiService:
             f'Web search context with agent: {agent_config["display_name"]}',
             f'Model: {model}, Temperature: {temperature}'
         )
-        # 1. Gọi web search thực sự
-        search_results = await self.web_search_service.search(message, chat_id, save_to_db=True)
-        # 2. Format prompt cho AI: chèn kết quả search vào system prompt
+        # 1. Gọi web search với LLM query optimization
+        search_data = await self.web_search_service.search_with_optimization(
+            message, model, chat_id, save_to_db=True
+        )
+        search_results = search_data['results']
+        optimized_query = search_data['optimized_query']
+        
+        # Log the query optimization result
+        if search_data['original_query'] != optimized_query:
+            logger.log_with_timestamp(
+                'WEB_SEARCH_OPTIMIZATION', 
+                f'Query optimized: "{search_data["original_query"]}" -> "{optimized_query}"'
+            )
+        # 2. Format prompt cho AI: chèn kết quả search vào system prompt với format rõ ràng hơn, bao gồm nội dung đã scrape
         if search_results:
-            sources_text = "\n".join([
-                f"- {item['title']}: {item['url']}\n{item['snippet']}" for item in search_results
-            ])
+            formatted_sources = []
+            for i, item in enumerate(search_results):
+                source_text = f"### {i+1}. {item['title']}\n\n{item['snippet']}"
+                # Thêm nội dung đã scrape nếu có
+                if 'scraped_content' in item and item['scraped_content']:
+                    source_text += f"\n\n**Nội dung từ trang web**:\n{item['scraped_content']}"
+                formatted_sources.append(source_text)
+            
+            sources_text = "\n\n".join(formatted_sources)
         else:
             sources_text = "(Không tìm thấy kết quả web search phù hợp)"
-        system_content = f"You are a helpful study assistant. Use the following web search results to answer the user's question as accurately as possible:\n\n{sources_text}"
+        
+        # Include optimized query information in system prompt
+        query_info = f"Search query used: '{optimized_query}'"
+        if search_data['original_query'] != optimized_query:
+            query_info += f" (optimized from: '{search_data['original_query']}')"
+        
+        system_content = f"You are a helpful study assistant. Use the following web search results to answer the user's question as accurately as possible:\n\n{query_info}\n\nSearch results:\n{sources_text}"
         system_message = {"role": "system", "content": system_content}
         messages = [system_message, {"role": "user", "content": message}]
         payload = {

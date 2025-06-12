@@ -17,6 +17,7 @@ from ..services.lmstudio_service import parse_time_lmstudio
 from ..services.file_service import FileService
 import threading
 import asyncio
+import pytz
 
 chat_bp = Blueprint('chat', __name__)
 ai_service = AiService()
@@ -150,16 +151,45 @@ async def chat():
                 user_content += "\n\nRelevant file excerpts:\n" + "\n\n---\n\n".join(all_file_chunks)
             else:
                 user_content += "\n\n[FILE_QUERY] Không tìm thấy đoạn văn phù hợp trong các file đã tải lên."
-        # Web search context
+        # Web search context with LLM query optimization
         if web_search_enabled:
-            web_results = await ai_service.web_search_service.search(message, chat_id, save_to_db=True)
+            agent_cfg = get_agent(agent_id)
+            search_data = await ai_service.web_search_service.search_with_optimization(
+                message, agent_cfg['model'], chat_id, save_to_db=True
+            )
+            web_results = search_data['results']
+            optimized_query = search_data['optimized_query']
+            
+            # Log the query optimization result
+            if search_data['original_query'] != optimized_query:
+                logger.log_with_timestamp(
+                    'WEB_SEARCH_OPTIMIZATION', 
+                    f'Query optimized: "{search_data["original_query"]}" -> "{optimized_query}"'
+                )
+            
             if web_results:
-                formatted = "\n".join([
-                    f"- {r['title']}: {r['url']}\n{r['snippet']}" for r in web_results
-                ])
-                user_content += "\n\nWeb search results:\n" + formatted
+                # Hiển thị kết quả web search với format rõ ràng hơn, bao gồm nội dung đã scrape
+                formatted_results = []
+                for i, r in enumerate(web_results):
+                    result_text = f"### {i+1}. {r['title']}\n\n{r['snippet']}"
+                    # Thêm nội dung đã scrape nếu có
+                    if 'scraped_content' in r and r['scraped_content']:
+                        result_text += f"\n\n**Nội dung từ trang web**:\n{r['scraped_content']}"
+                    formatted_results.append(result_text)
+                
+                formatted = "\n\n".join(formatted_results)
+                user_content += f"\n\n## Web search results\n**Query used**: '{optimized_query}'\n\n" + formatted
         # Schedule context (only parse time for schedule/date_query)
         if classification.get('category') in ('schedule','date_query'):
+            # Add current time information for schedule queries with XML tags
+            current_time = get_vietnam_current_time()
+            user_content += f"\n\n<current_time>\n"
+            user_content += f"<today_info>\n"
+            user_content += f"Hôm nay là {current_time['weekday']}, ngày {current_time['date']}\n"
+            user_content += f"Giờ hiện tại: {current_time['time']}\n"
+            user_content += f"</today_info>\n"
+            user_content += f"</current_time>\n"
+            
             time_info = parse_time_lmstudio(message)
             # Log time parsing result
             logger.log_with_timestamp(
@@ -183,10 +213,23 @@ async def chat():
                     time_info, current_sem.get('hoc_ky')
                 )
                 sched_text = sched.get('schedule_text', '') if isinstance(sched, dict) else str(sched)
-                user_content += "\n\nSchedule info:\n" + sched_text
+                user_content += "\n<class_schedule>\n"
+                user_content += f"<query_type>{time_info.get('type', 'unknown')}</query_type>\n"
+                user_content += f"<query_value>{time_info.get('value', 'unknown')}</query_value>\n"
+                user_content += f"<schedule_data>\n{sched_text}\n</schedule_data>\n"
+                user_content += "</class_schedule>"
 
         # Exam context: date_query should fetch filtered exams, examschedule fetch full schedule
         if classification.get('category') in ('date_query','examschedule'):
+            # Add current time information for exam schedule queries with XML tags
+            current_time = get_vietnam_current_time()
+            user_content += f"\n\n<current_time>\n"
+            user_content += f"<today_info>\n"
+            user_content += f"Hôm nay là {current_time['weekday']}, ngày {current_time['date']}\n"
+            user_content += f"Giờ hiện tại: {current_time['time']}\n"
+            user_content += f"</today_info>\n"
+            user_content += f"</current_time>\n"
+            
             creds = data.get('university_credentials')
             if creds:
                 success, err = ptit_auth_service.login(
@@ -208,7 +251,12 @@ async def chat():
                         f"Filtered exams for date {time_info.get('value')}",
                         exam_txt[:200]
                     )
-                    user_content += "\n\nExam info:\n" + exam_txt
+                    user_content += "\n<exam_schedule>\n"
+                    user_content += f"<query_type>date_specific</query_type>\n"
+                    user_content += f"<query_value>{time_info.get('value', 'unknown')}</query_value>\n"
+                    user_content += f"<exam_count>{len(exams_list)}</exam_count>\n"
+                    user_content += f"<exam_data>\n{exam_txt}\n</exam_data>\n"
+                    user_content += "</exam_schedule>"
                 else:
                     # Full exam schedule for all dates
                     data = await exam_schedule_service.get_exam_schedule_by_semester(
@@ -223,7 +271,11 @@ async def chat():
                         f"Fetched full exam schedule for semester {current_sem.get('hoc_ky')}",
                         full_exam_txt[:200]
                     )
-                    user_content += "\n\nFull exam schedule data:\n" + full_exam_txt
+                    user_content += "\n<exam_schedule>\n"
+                    user_content += f"<query_type>full_schedule</query_type>\n"
+                    user_content += f"<exam_count>{len(all_exams)}</exam_count>\n"
+                    user_content += f"<exam_data>\n{full_exam_txt}\n</exam_data>\n"
+                    user_content += "</exam_schedule>"
 
         # Append no_thinking flag at the end if present
         if flag:
@@ -235,7 +287,7 @@ async def chat():
             f"Category: {classification.get('category')}"
         )
 
-        # Prepare system prompt with category awareness
+        # Prepare system prompt with category awareness and XML guidance
         category = classification.get('category', 'general')
         if category == 'other':
             system_content = (
@@ -243,6 +295,34 @@ async def chat():
                 "you can also provide polite, brief responses to non-educational questions when appropriate. "
                 "If the question is clearly off-topic or inappropriate, you may politely redirect to educational topics. "
                 "Answer based on context when provided, otherwise use your general knowledge appropriately."
+            )
+        elif category in ('schedule', 'date_query', 'examschedule'):
+            system_content = (
+                "<role>You are a dedicated study assistant for university students in Vietnam specializing in academic schedule and exam information.</role>\n\n"
+                "<instructions>\n"
+                "- Analyze the provided XML-structured data carefully and use ALL information available\n"
+                "- Use ONLY the information provided in the <class_schedule>, <exam_schedule>, and <current_time> tags\n"
+                "- ALWAYS provide COMPLETE and COMPREHENSIVE responses that include ALL details from the data\n"
+                "- For schedule queries: Include ALL class details - subject name (both Vietnamese and English), time slots, room, instructor name with ID, credits, dates\n"
+                "- For exam queries: Include ALL exam details - subject name, exam type, format, time, weekday, date, room, location\n"
+                "- When user asks follow-up questions, refer to the conversation history to provide context and complete answers\n"
+                "- Always reference the current time context when explaining relative dates (today, tomorrow, next week)\n"
+                "- Use Vietnamese language naturally and professionally\n"
+                "- Organize information logically with clear headings, bullet points, and structured formatting\n"
+                "- Never provide partial information - if data is available, include it ALL\n"
+                "- Do not add or fabricate any information not present in the provided XML data\n"
+                "</instructions>\n\n"
+                "<response_format>\n"
+                "- NEVER start with summary, overview, or any introductory text\n"
+                "- Begin immediately with the specific information requested\n"
+                "- Do NOT use phrases like 'summary:', 'tóm tắt:', 'overview:', or similar introductory words\n"
+                "- Present ALL information from the provided data in a clear, organized format\n"
+                "- Use headers, lists, and bullet points to structure the complete information\n"
+                "- Include every single detail available in the data - subject names, times, rooms, instructors, credits, etc.\n"
+                "- Organize by date/time chronologically when showing multiple items\n"
+                "- End with brief helpful context only if relevant\n"
+                "- If user asks follow-up questions, check conversation history and provide complete context\n"
+                "</response_format>"
             )
         else:
             system_content = (
@@ -256,37 +336,27 @@ async def chat():
             'content': system_content
         }
         
-        # Build messages with conversation history
+        # Build messages without conversation history - only system prompt and current user query
         messages = [system_message]
-        
-        # Add conversation history (limit to last 10 messages to avoid token limit)
-        if conversation_history:
-            # Get the last 10 messages but exclude the current user message (which is already in user_content)
-            recent_history = conversation_history[-10:]
-            for hist_msg in recent_history:
-                # Only add messages with role and content
-                if hist_msg.get('role') and hist_msg.get('content'):
-                    messages.append({
-                        'role': hist_msg['role'],
-                        'content': hist_msg['content']
-                    })
-            logger.log_with_timestamp(
-                "CONVERSATION_HISTORY",
-                f"Added {len(recent_history)} messages from conversation history"
-            )
         
         # Add current user message with all context
         messages.append({'role':'user','content': user_content})
+        
+        # Log that we're not using conversation history
+        logger.log_with_timestamp(
+            "CONVERSATION_HISTORY",
+            "Skipping conversation history - sending only system prompt and current query"
+        )
         # Handle streaming response
         agent_cfg = get_agent(agent_id)
         payload = {
             'model': agent_cfg['model'],
             'messages': messages,
-            'temperature': 0.0,
+            'temperature': 0.2,
             'stream': True
         }
         # Log raw payload sent to LM Studio (full content)
-        print(f"[{Logger.get_timestamp()}] LMSTUDIO_PAYLOAD: {json.dumps(payload)}")
+        print(f"[{Logger.get_timestamp()}] LMSTUDIO_PAYLOAD: {json.dumps(payload, ensure_ascii=False, indent=2)}")
         
         # Save user message to database first
         if chat_id:
@@ -448,3 +518,30 @@ def messages_per_day():
     except Exception as e:
         logger.log_with_timestamp('DASHBOARD_METRICS_ERROR', str(e))
         return jsonify([]), 500
+
+def get_vietnam_current_time():
+    """Get current date and time in Vietnam timezone"""
+    vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+    now = datetime.now(vietnam_tz)
+    
+    # Vietnamese weekday names
+    vietnamese_weekdays = {
+        0: "Thứ Hai",    # Monday
+        1: "Thứ Ba",     # Tuesday  
+        2: "Thứ Tư",     # Wednesday
+        3: "Thứ Năm",    # Thursday
+        4: "Thứ Sáu",    # Friday
+        5: "Thứ Bảy",    # Saturday
+        6: "Chủ Nhật"    # Sunday
+    }
+    
+    weekday_vn = vietnamese_weekdays[now.weekday()]
+    date_str = now.strftime('%d/%m/%Y')
+    time_str = now.strftime('%H:%M:%S')
+    
+    return {
+        'date': date_str,
+        'time': time_str,
+        'weekday': weekday_vn,
+        'datetime_obj': now
+    }

@@ -221,7 +221,14 @@ class ExamScheduleService:
             # Add exam details
             result += f"   {ky_thi}\n"
             result += f"   Hình thức: {hinh_thuc_thi}\n"
-            result += f"   Thời gian: {gio_bat_dau}, {so_phut} phút, ngày {ngay_thi}\n"
+            
+            # Get weekday for the exam date
+            weekday = self.get_weekday_from_date(ngay_thi)
+            if weekday:
+                result += f"   Thời gian: {gio_bat_dau}, {so_phut} phút, {weekday} ngày {ngay_thi}\n"
+            else:
+                result += f"   Thời gian: {gio_bat_dau}, {so_phut} phút, ngày {ngay_thi}\n"
+            
             result += f"   Phòng thi: {ma_phong}, {dia_diem_thi}\n\n"
             
         return result
@@ -471,3 +478,31 @@ class ExamScheduleService:
         filtered_exams = [e for e in all_exams if e.get('ngay_thi') in exam_dates]
         exam_text = self.format_exam_schedule(filtered_exams)
         return filtered_exams, exam_text, date_info 
+
+    def get_weekday_from_date(self, date_str):
+        """Convert date string (DD/MM/YYYY) to Vietnamese weekday name
+        
+        Args:
+            date_str (str): Date in format DD/MM/YYYY
+            
+        Returns:
+            str: Vietnamese weekday name or empty string if invalid date
+        """
+        try:
+            # Parse the date string
+            date_obj = datetime.strptime(date_str, '%d/%m/%Y')
+            
+            # Vietnamese weekday names
+            vietnamese_weekdays = {
+                0: "Thứ Hai",    # Monday
+                1: "Thứ Ba",     # Tuesday  
+                2: "Thứ Tư",     # Wednesday
+                3: "Thứ Năm",    # Thursday
+                4: "Thứ Sáu",    # Friday
+                5: "Thứ Bảy",    # Saturday
+                6: "Chủ Nhật"    # Sunday
+            }
+            
+            return vietnamese_weekdays[date_obj.weekday()]
+        except (ValueError, KeyError):
+            return "" 

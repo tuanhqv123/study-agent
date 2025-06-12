@@ -11,9 +11,9 @@ class WebScraperService:
         # Timeout tối đa cho mỗi request
         self.timeout = 10.0
         # Số lượng URL tối đa để scrape
-        self.max_urls = 3
-        # Giới hạn ký tự cho mỗi URL (300 ký tự)
-        self.max_chars_per_url = 300
+        self.max_urls = 5
+        # Giới hạn ký tự cho mỗi URL (800 ký tự)
+        self.max_chars_per_url = 800
         # Số ký tự trung bình cho một token (ước lượng)
         self.chars_per_token = 4
 
@@ -113,9 +113,19 @@ class WebScraperService:
     def _extract_relevant_content(self, soup):
         """Trích xuất nội dung có ý nghĩa và phù hợp nhất từ trang web"""
         # Loại bỏ các phần không liên quan
-        for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'iframe', 'form']):
+        for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'iframe', 'form', 'meta', 'link']):
             tag.decompose()
             
+        # Tạo danh sách để lưu nội dung có cấu trúc
+        content_parts = []
+        
+        # Trích xuất tiêu đề h1, h2, h3 quan trọng
+        headings = soup.find_all(['h1', 'h2', 'h3'])
+        for heading in headings[:3]:  # Lấy tối đa 3 tiêu đề quan trọng nhất
+            heading_text = heading.get_text(strip=True)
+            if heading_text and len(heading_text) > 10:  # Chỉ lấy tiêu đề có ý nghĩa
+                content_parts.append(f"Heading: {heading_text}")
+        
         # Ưu tiên nội dung từ các thẻ article hoặc main
         main_content = soup.find(['article', 'main', 'div[role="main"]', '[class*="content"]', '[id*="content"]'])
         
@@ -123,37 +133,62 @@ class WebScraperService:
             # Lấy các đoạn văn từ phần nội dung chính
             paragraphs = main_content.find_all('p')
             if paragraphs:
-                # Lọc và sắp xếp các đoạn văn có nội dung có ý nghĩa (độ dài > 20 ký tự)
-                meaningful_paragraphs = [p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 20]
-                return '\n\n'.join(meaningful_paragraphs)
-            else:
-                # Nếu không tìm thấy thẻ p, lấy toàn bộ text từ nội dung chính
-                return main_content.get_text(separator='\n\n', strip=True)
+                # Lọc và sắp xếp các đoạn văn có nội dung có ý nghĩa (độ dài > 30 ký tự)
+                meaningful_paragraphs = [p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 30]
+                # Lấy tối đa 5 đoạn văn có ý nghĩa
+                for p in meaningful_paragraphs[:5]:
+                    content_parts.append(p)
+            
+            # Thử lấy các danh sách (ul, ol) nếu có
+            lists = main_content.find_all(['ul', 'ol'])
+            for lst in lists[:2]:  # Lấy tối đa 2 danh sách
+                list_items = lst.find_all('li')
+                list_text = []
+                for item in list_items[:5]:  # Lấy tối đa 5 mục trong mỗi danh sách
+                    item_text = item.get_text(strip=True)
+                    if len(item_text) > 15:  # Chỉ lấy các mục có ý nghĩa
+                        list_text.append(f"• {item_text}")
+                if list_text:
+                    content_parts.append("\n".join(list_text))
         else:
             # Nếu không tìm thấy phần chính, lấy các đoạn văn có ý nghĩa
             paragraphs = soup.find_all('p')
-            meaningful_paragraphs = [p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 20]
-            return '\n\n'.join(meaningful_paragraphs)
+            meaningful_paragraphs = [p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 30]
+            # Lấy tối đa 5 đoạn văn có ý nghĩa
+            for p in meaningful_paragraphs[:5]:
+                content_parts.append(p)
+        
+        # Kết hợp tất cả các phần nội dung
+        combined_content = "\n\n".join(content_parts)
+        
+        # Nếu không tìm thấy nội dung có cấu trúc, lấy toàn bộ text
+        if not combined_content:
+            # Lấy toàn bộ text từ body, loại bỏ khoảng trắng thừa
+            body_text = soup.body.get_text(separator='\n', strip=True) if soup.body else ""
+            # Lấy tối đa 1000 ký tự đầu tiên
+            return body_text[:1000]
+            
+        return combined_content
             
     def _clean_and_limit_content(self, content):
-        """Làm sạch nội dung văn bản và giới hạn ở 300 ký tự"""
+        """Làm sạch nội dung văn bản và giới hạn ở số ký tự tối đa"""
         if not content:
             return ''
             
         # Loại bỏ nhiều khoảng trắng liên tiếp
         content = re.sub(r'\s+', ' ', content)
         
-        # Loại bỏ các ký tự đặc biệt
-        content = re.sub(r'[^\w\s.,;:?!()\'"-]', '', content)
+        # Loại bỏ các ký tự đặc biệt nhưng giữ lại unicode cho tiếng Việt
+        content = re.sub(r'[^\w\s.,;:?!()\'"-]', '', content, flags=re.UNICODE)
         
-        # Giới hạn chính xác 300 ký tự, đảm bảo không cắt giữa từ
+        # Giới hạn ở số ký tự tối đa, đảm bảo không cắt giữa từ
         if len(content) > self.max_chars_per_url:
-            # Tìm vị trí dấu cách gần nhất trước 300 ký tự
+            # Tìm vị trí dấu cách gần nhất trước giới hạn ký tự
             cutoff = self.max_chars_per_url
             while cutoff > 0 and content[cutoff] != ' ':
                 cutoff -= 1
                 
-            # Nếu không tìm thấy khoảng trắng, cắt tại 300 ký tự
+            # Nếu không tìm thấy khoảng trắng, cắt tại giới hạn ký tự
             if cutoff == 0:
                 cutoff = self.max_chars_per_url
                 

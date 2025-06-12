@@ -122,7 +122,7 @@
 }
 
 .markdown-content hr {
-  @apply my-8 border-[#d1cfc0]/20;
+  @apply my-1 border-[#d1cfc0]/20;
 }
 
 :root {
