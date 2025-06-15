@@ -4,6 +4,9 @@ from ..services.query_classifier import QueryClassifier
 from ..services.schedule_service import ScheduleService
 from ..services.exam_schedule_service import ExamScheduleService
 from ..services.ptit_auth_service import PTITAuthService
+from ..services.ptit_api_service import ptit_api_service
+from ..services.ptit_cache_service import ptit_cache_service
+
 from ..utils.logger import Logger
 from ..lib.supabase import supabase
 import time
@@ -18,6 +21,7 @@ from ..services.file_service import FileService
 import threading
 import asyncio
 import pytz
+import uuid
 
 chat_bp = Blueprint('chat', __name__)
 ai_service = AiService()
@@ -26,6 +30,7 @@ query_classifier = QueryClassifier()
 schedule_service = ScheduleService()
 exam_schedule_service = ExamScheduleService()
 ptit_auth_service = PTITAuthService()
+file_service = FileService()
 
 # Initialize services with auth service and AI service
 schedule_service.set_auth_service(ptit_auth_service)
@@ -179,6 +184,9 @@ async def chat():
                 
                 formatted = "\n\n".join(formatted_results)
                 user_content += f"\n\n## Web search results\n**Query used**: '{optimized_query}'\n\n" + formatted
+        # Generate or use existing chat session ID for caching
+        chat_session_id = chat_id if chat_id else str(uuid.uuid4())
+        
         # Schedule context (only parse time for schedule/date_query)
         if classification.get('category') in ('schedule','date_query'):
             # Add current time information for schedule queries with XML tags
@@ -190,34 +198,41 @@ async def chat():
             user_content += f"</today_info>\n"
             user_content += f"</current_time>\n"
             
-            time_info = parse_time_lmstudio(message)
-            # Log time parsing result
-            logger.log_with_timestamp(
-                "TIME_PARSER",
-                f"Type: {time_info.get('type')}",
-                f"Value: {time_info.get('value')}"
-            )
             creds = data.get('university_credentials')
             if creds:
                 success, err = ptit_auth_service.login(
                     creds['university_username'], creds['university_password']
                 )
-            current_sem = None
-            try:
-                current_sem, _ = ptit_auth_service.get_current_semester()
-            except:
-                pass
-            if current_sem:
-                # Use pre-parsed time_info directly
-                sched = await schedule_service.process_schedule_query(
-                    time_info, current_sem.get('hoc_ky')
-                )
-                sched_text = sched.get('schedule_text', '') if isinstance(sched, dict) else str(sched)
-                user_content += "\n<class_schedule>\n"
-                user_content += f"<query_type>{time_info.get('type', 'unknown')}</query_type>\n"
-                user_content += f"<query_value>{time_info.get('value', 'unknown')}</query_value>\n"
-                user_content += f"<schedule_data>\n{sched_text}\n</schedule_data>\n"
-                user_content += "</class_schedule>"
+                
+                if success:
+                    # Get current semester with cache
+                    current_sem, from_cache = await ptit_api_service.get_current_semester_with_cache(chat_session_id, ptit_auth_service)
+                    cache_status = "📋 [CACHED]" if from_cache else "🔄 [API]"
+                    logger.log_with_timestamp('PTIT_SEMESTER', f'{cache_status} Semester retrieved')
+                    
+                    if current_sem and classification.get('category') == 'schedule':
+                        # Parse time query (always executed, not cached)
+                        time_info = parse_time_lmstudio(message)
+                        logger.log_with_timestamp(
+                            "TIME_PARSER",
+                            f"Type: {time_info.get('type')}",
+                            f"Value: {time_info.get('value')}"
+                        )
+                        
+                        # Get schedule data with cache
+                        schedule_data, from_cache = await ptit_api_service.get_schedule_with_cache(
+                            chat_session_id, time_info, current_sem.get('hoc_ky'), schedule_service
+                        )
+                        cache_status = "📋 [CACHED]" if from_cache else "🔄 [API]"
+                        logger.log_with_timestamp('PTIT_SCHEDULE', f'{cache_status} Schedule retrieved')
+                        
+                        if schedule_data:
+                            sched_text = schedule_data.get('schedule_text', '') if isinstance(schedule_data, dict) else str(schedule_data)
+                            user_content += "\n<class_schedule>\n"
+                            user_content += f"<query_type>{time_info.get('type', 'unknown')}</query_type>\n"
+                            user_content += f"<query_value>{time_info.get('value', 'unknown')}</query_value>\n"
+                            user_content += f"<schedule_data>\n{sched_text}\n</schedule_data>\n"
+                            user_content += "</class_schedule>"
 
         # Exam context: date_query should fetch filtered exams, examschedule fetch full schedule
         if classification.get('category') in ('date_query','examschedule'):
@@ -231,51 +246,67 @@ async def chat():
             user_content += f"</current_time>\n"
             
             creds = data.get('university_credentials')
+            logger.log_with_timestamp('CREDENTIALS_CHECK_EXAM', f'Credentials provided: {bool(creds)}')
+            
             if creds:
+                logger.log_with_timestamp('CREDENTIALS_CHECK_EXAM', f'Username: {creds.get("university_username", "N/A")}')
                 success, err = ptit_auth_service.login(
                     creds['university_username'], creds['university_password']
                 )
-            current_sem = None
-            try:
-                current_sem, _ = ptit_auth_service.get_current_semester()
-            except:
-                pass
-            if current_sem:
-                if classification.get('category') == 'date_query':
-                    # Filtered exams for specific date
-                    exams_list, exam_txt, _ = await exam_schedule_service.get_exams_for_query(
-                        message, current_sem.get('hoc_ky')
-                    )
-                    logger.log_with_timestamp(
-                        "EXAM_API_DATA",
-                        f"Filtered exams for date {time_info.get('value')}",
-                        exam_txt[:200]
-                    )
-                    user_content += "\n<exam_schedule>\n"
-                    user_content += f"<query_type>date_specific</query_type>\n"
-                    user_content += f"<query_value>{time_info.get('value', 'unknown')}</query_value>\n"
-                    user_content += f"<exam_count>{len(exams_list)}</exam_count>\n"
-                    user_content += f"<exam_data>\n{exam_txt}\n</exam_data>\n"
-                    user_content += "</exam_schedule>"
-                else:
-                    # Full exam schedule for all dates
-                    data = await exam_schedule_service.get_exam_schedule_by_semester(
-                        current_sem.get('hoc_ky'), False
-                    )
-                    all_exams = data.get('data', {}).get('ds_lich_thi', [])
-                    # Format full exam list
-                    full_exam_txt = exam_schedule_service.format_exam_schedule(all_exams)
-                    # Log full exam schedule and append to user_content
-                    logger.log_with_timestamp(
-                        "EXAM_API_DATA",
-                        f"Fetched full exam schedule for semester {current_sem.get('hoc_ky')}",
-                        full_exam_txt[:200]
-                    )
-                    user_content += "\n<exam_schedule>\n"
-                    user_content += f"<query_type>full_schedule</query_type>\n"
-                    user_content += f"<exam_count>{len(all_exams)}</exam_count>\n"
-                    user_content += f"<exam_data>\n{full_exam_txt}\n</exam_data>\n"
-                    user_content += "</exam_schedule>"
+                
+                if success:
+                    # Get current semester with cache
+                    current_sem, from_cache = await ptit_api_service.get_current_semester_with_cache(chat_session_id, ptit_auth_service)
+                    cache_status = "📋 [CACHED]" if from_cache else "🔄 [API]"
+                    logger.log_with_timestamp('PTIT_SEMESTER', f'{cache_status} Semester retrieved')
+                    
+                    if current_sem:
+                        semester = current_sem.get('hoc_ky')
+                        
+                        if classification.get('category') == 'date_query':
+                            # Determine if it's specific exam query or general
+                            exam_keywords = ['thi', 'exam', 'kiểm tra', 'test']
+                            is_specific_subject = any(keyword in message.lower() for keyword in ['môn', 'subject', 'ai', 'machine learning', 'python'])
+                            
+                            if is_specific_subject:
+                                # Specific subject exam query with cache
+                                exam_data, from_cache = await ptit_api_service.get_exams_with_cache(
+                                    chat_session_id, message, semester, exam_schedule_service
+                                )
+                            else:
+                                # General exam schedule query with cache
+                                exam_data, from_cache = await ptit_api_service.get_all_exams_with_cache(
+                                    chat_session_id, semester, exam_schedule_service
+                                )
+                            
+                            cache_status = "📋 [CACHED]" if from_cache else "🔄 [API]"
+                            logger.log_with_timestamp('PTIT_EXAMS', f'{cache_status} Exam data retrieved')
+                            
+                            if exam_data:
+                                exam_txt = exam_data.get('exam_text', '')
+                                exams_list = exam_data.get('exams_list', [])
+                                user_content += "\n<exam_schedule>\n"
+                                user_content += f"<query_type>{'specific' if is_specific_subject else 'general'}</query_type>\n"
+                                user_content += f"<exam_count>{len(exams_list)}</exam_count>\n"
+                                user_content += f"<exam_data>\n{exam_txt}\n</exam_data>\n"
+                                user_content += "</exam_schedule>"
+                        
+                        elif classification.get('category') == 'examschedule':
+                            # Full exam schedule with cache
+                            exam_data, from_cache = await ptit_api_service.get_all_exams_with_cache(
+                                chat_session_id, semester, exam_schedule_service
+                            )
+                            cache_status = "📋 [CACHED]" if from_cache else "🔄 [API]"
+                            logger.log_with_timestamp('PTIT_EXAMS', f'{cache_status} Full exam schedule retrieved')
+                            
+                            if exam_data:
+                                exam_txt = exam_data.get('exam_text', '')
+                                exams_list = exam_data.get('exams_list', [])
+                                user_content += "\n<exam_schedule>\n"
+                                user_content += f"<query_type>full_schedule</query_type>\n"
+                                user_content += f"<exam_count>{len(exams_list)}</exam_count>\n"
+                                user_content += f"<exam_data>\n{exam_txt}\n</exam_data>\n"
+                                user_content += "</exam_schedule>"
 
         # Append no_thinking flag at the end if present
         if flag:
